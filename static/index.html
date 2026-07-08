@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>CTA Arrivals</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: #0b0e14;
+    color: #e8eaf0;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* full-screen map behind everything */
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 0; }
+  #map svg { display: block; width: 100%; height: 100%; }
+
+  header {
+    position: absolute; top: 0; left: 0; right: 0;
+    z-index: 3;
+    padding: 12px 16px 6px;
+    display: -webkit-flex; display: flex;
+    -webkit-align-items: center; align-items: center;
+  }
+  #station-btn {
+    background: rgba(22, 27, 38, 0.88);
+    color: #e8eaf0;
+    border: 1px solid #2a3242;
+    border-radius: 10px;
+    font-size: 19px;
+    padding: 9px 14px;
+    max-width: 50%;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #station-btn .arrow { color: #4b5568; font-size: 13px; margin-left: 8px; }
+  .hbtn {
+    background: rgba(22, 27, 38, 0.88);
+    border: 1px solid #2a3242;
+    border-radius: 10px;
+    font-size: 22px; color: #6b7688;
+    padding: 6px 12px; margin-left: 8px; cursor: pointer;
+  }
+  #fav-toggle.on { color: #fbbf24; }
+  #unsure-toggle.on { color: #a78bfa; border-color: #5b4b8a; }
+  #clock {
+    font-size: 24px; font-weight: 300; color: #c8cfdc;
+    font-variant-numeric: tabular-nums; margin-left: auto;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+  }
+  #favs {
+    position: absolute; top: 62px; left: 16px; right: 16px;
+    z-index: 3;
+    white-space: nowrap; overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .chip {
+    display: inline-block;
+    background: rgba(22, 27, 38, 0.88);
+    border: 1px solid #2a3242;
+    border-radius: 999px;
+    color: #9aa3b5;
+    font-size: 15px;
+    padding: 7px 14px;
+    margin-right: 8px;
+    cursor: pointer;
+  }
+  .chip.active { background: rgba(29, 58, 95, 0.92); border-color: #2f5f9e; color: #e8eaf0; }
+
+  /* floating direction cards */
+  #board {
+    position: absolute; top: 110px; left: 16px; right: 16px; bottom: 16px;
+    z-index: 2;
+    display: -webkit-flex; display: flex;
+    -webkit-justify-content: space-between; justify-content: space-between;
+    -webkit-align-items: flex-start; align-items: flex-start;
+    pointer-events: none;
+  }
+  .col {
+    width: 320px; max-width: 46%;
+    max-height: 100%;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: rgba(13, 17, 26, 0.82);
+    border: 1px solid rgba(42, 50, 66, 0.9);
+    border-radius: 16px;
+    padding: 2px 14px 6px;
+    pointer-events: auto;
+  }
+  .col h2 {
+    font-size: 12px; font-weight: 600;
+    color: #9aa3b5;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 10px 0 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .row {
+    display: -webkit-flex; display: flex;
+    -webkit-align-items: center; align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(26, 32, 41, 0.9);
+  }
+  .row:last-child { border-bottom: none; }
+  .badge {
+    width: 46px; height: 36px;
+    border-radius: 9px;
+    display: -webkit-flex; display: flex;
+    -webkit-align-items: center; align-items: center;
+    -webkit-justify-content: center; justify-content: center;
+    font-size: 11px; font-weight: bold; color: #fff;
+    margin-right: 10px;
+    -webkit-flex-shrink: 0; flex-shrink: 0;
+  }
+  .dest { -webkit-flex: 1; flex: 1; min-width: 0; font-size: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dest small { display: block; font-size: 10px; color: #9aa3b5; font-weight: 400; }
+  .cell { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .c-min { min-width: 44px; font-size: 19px; font-weight: 400; }
+  .c-min.due { color: #4ade80; font-weight: 600; }
+  .c-min.delayed { color: #f87171; font-size: 14px; }
+  .c-min.sched { color: #9aa3b5; }
+  .c-at { min-width: 44px; font-size: 13px; color: #9aa3b5; margin-left: 8px; }
+  .c-leave { min-width: 52px; font-size: 14px; color: #7dd3fc; margin-left: 8px; }
+  .c-leave.missed { color: #4b5568; }
+  .c-leave.now { color: #4ade80; font-weight: 600; }
+  #walk-pop {
+    position: absolute; top: 62px; right: 16px;
+    z-index: 5;
+    background: rgba(13, 17, 26, 0.95);
+    border: 1px solid #2a3242;
+    border-radius: 14px;
+    padding: 14px 16px;
+    display: none;
+    text-align: center;
+  }
+  #walk-pop .wp-title { font-size: 13px; color: #9aa3b5; margin-bottom: 10px; }
+  #walk-pop .wp-row { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; }
+  #walk-pop button {
+    background: #161b26; border: 1px solid #2a3242; border-radius: 10px;
+    color: #e8eaf0; font-size: 24px; width: 44px; height: 44px; cursor: pointer;
+  }
+  #walk-pop .wp-val { font-size: 22px; min-width: 76px; font-variant-numeric: tabular-nums; }
+
+  #status-box {
+    position: absolute; top: 120px; left: 50%;
+    z-index: 2;
+    -webkit-transform: translateX(-50%); transform: translateX(-50%);
+    background: rgba(13, 17, 26, 0.88);
+    border: 1px solid #2a3242;
+    border-radius: 999px;
+    padding: 10px 22px;
+    font-size: 17px; color: #9aa3b5;
+    display: none;
+    max-width: 90%;
+  }
+  #status-box.error { color: #f87171; }
+
+  /* ---------- station picker ---------- */
+  #picker {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(6, 8, 12, 0.94);
+    z-index: 10;
+    display: none;
+    -webkit-flex-direction: column; flex-direction: column;
+  }
+  #picker.open { display: -webkit-flex; display: flex; }
+  #picker-head {
+    padding: 16px 20px;
+    display: -webkit-flex; display: flex;
+    -webkit-align-items: center; align-items: center;
+    -webkit-justify-content: space-between; justify-content: space-between;
+    -webkit-flex-shrink: 0; flex-shrink: 0;
+  }
+  #picker-head h3 { font-size: 20px; font-weight: 500; }
+  #picker-close { background: none; border: none; color: #9aa3b5; font-size: 30px; padding: 0 8px; cursor: pointer; }
+  #line-tabs {
+    padding: 0 20px 14px;
+    white-space: nowrap; overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    -webkit-flex-shrink: 0; flex-shrink: 0;
+  }
+  .ltab {
+    display: inline-block;
+    border-radius: 999px;
+    font-size: 17px; font-weight: bold;
+    padding: 10px 18px;
+    margin-right: 8px;
+    color: #fff;
+    opacity: 0.35;
+    cursor: pointer;
+    border: 2px solid transparent;
+  }
+  .ltab.active { opacity: 1; border-color: #e8eaf0; }
+  #stop-list {
+    -webkit-flex: 1; flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0 20px 30px;
+  }
+  .stop {
+    display: -webkit-flex; display: flex;
+    -webkit-align-items: center; align-items: center;
+    padding: 13px 10px;
+    border-left: 6px solid #333;
+    margin-left: 10px;
+    cursor: pointer;
+  }
+  .stop .dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #0b0e14; border: 3px solid #888;
+    margin-left: -20px; margin-right: 16px;
+    -webkit-flex-shrink: 0; flex-shrink: 0;
+  }
+  .stop .nm { font-size: 20px; }
+  .stop.cur .nm { color: #4ade80; font-weight: bold; }
+  .stop .xfer { margin-left: 10px; }
+  .stop .xfer i {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    margin-right: 4px;
+  }
+  @media (max-width: 700px) {
+    .col { width: 47%; max-width: 47%; max-height: 42%; padding: 0 10px 4px; }
+    .badge { width: 38px; height: 30px; font-size: 9px; margin-right: 8px; border-radius: 7px; }
+    .dest { font-size: 14px; }
+    .eta { min-width: 52px; }
+    .eta .min { font-size: 18px; }
+    .eta .at { font-size: 10px; }
+    #station-btn { font-size: 15px; padding: 7px 10px; }
+    #clock { font-size: 18px; }
+    .hbtn { font-size: 17px; padding: 5px 9px; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<header>
+  <button id="station-btn">Loading&hellip;<span class="arrow">&#9662;</span></button>
+  <button id="fav-toggle" class="hbtn" title="Toggle favorite">&#9733;</button>
+  <button id="locate" class="hbtn" title="Nearest station">&#9678;</button>
+  <button id="unsure-toggle" class="hbtn" title="Show doubtful trains">&#128123;</button>
+  <button id="walk-btn" class="hbtn" title="Walk time to station">&#128694;</button>
+  <div id="clock">--:--</div>
+</header>
+<div id="favs"></div>
+<div id="board"></div>
+<div id="status-box"></div>
+<div id="walk-pop">
+  <div class="wp-title">Walk time to station</div>
+  <div class="wp-row">
+    <button id="wp-minus">&minus;</button>
+    <span class="wp-val" id="wp-val">off</span>
+    <button id="wp-plus">+</button>
+  </div>
+</div>
+
+<div id="picker">
+  <div id="picker-head"><h3>Pick a line, then a stop</h3><button id="picker-close">&#10005;</button></div>
+  <div id="line-tabs"></div>
+  <div id="stop-list"></div>
+</div>
+
+<script>
+(function () {
+  var COLORS = {
+    "Red": "#c60c30", "Blue": "#00a1de", "Brn": "#8d5a24", "G": "#009b3a",
+    "Org": "#f9461c", "P": "#522398", "Pink": "#e27ea6", "Y": "#f9e300"
+  };
+  var BADGE = {
+    "Red": "#c60c30", "Blue": "#00a1de", "Brn": "#62361b", "G": "#009b3a",
+    "Org": "#f9461c", "P": "#522398", "Pink": "#e27ea6", "Y": "#f9e300"
+  };
+  var NAMES = {
+    "Red": "Red", "Blue": "Blue", "Brn": "Brown", "G": "Green",
+    "Org": "Orange", "P": "Purple", "Pink": "Pink", "Y": "Yellow"
+  };
+  var LINE_SEQ = ["Red", "Blue", "Brn", "G", "Org", "P", "Pink", "Y"];
+  // no car-count in the CTA feed; assign typical consists per route
+  var CARS = { "Red": 8, "Blue": 8, "G": 8, "Brn": 6, "Org": 6, "P": 6, "Pink": 6, "Y": 2 };
+
+  var board = document.getElementById("board");
+  var statusBox = document.getElementById("status-box");
+  var mapEl = document.getElementById("map");
+  var clock = document.getElementById("clock");
+  var favBar = document.getElementById("favs");
+  var favBtn = document.getElementById("fav-toggle");
+  var locBtn = document.getElementById("locate");
+  var stnBtn = document.getElementById("station-btn");
+  var picker = document.getElementById("picker");
+  var lineTabs = document.getElementById("line-tabs");
+  var stopList = document.getElementById("stop-list");
+
+  var stationList = [];
+  var stationById = {};
+  var lineOrder = {};
+  var trackRoutes = null;
+  var curId = null;
+  var pickerLine = null;
+  var lastArrivals = null;
+  var lastArrivalsFor = null; // mapid the arrivals belong to
+  var lastPositions = null;   // every live train system-wide (grey ambient layer)
+  var trackPx = null;         // per-route track polylines in px, for car snapping
+  var lastFetch = 0;
+  var animTrains = [];
+  var animProject = null;
+  var timer = null;
+  var zoomTimer = null;
+  var zooming = false;
+  var zoomPending = false;
+  var showUnsure = read("cta_unsure") === "1";
+  var walkMin = parseInt(read("cta_walk"), 10) || 0; // minutes to walk to the station
+  var dispState = {}; // per-run smoothed display positions, survives map rebuilds
+  var lastRadius = 0, lastRadiusFor = null; // sticky zoom level between refreshes
+
+  function store(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
+  function read(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+  function getFavs() {
+    try { return JSON.parse(read("cta_favs")) || []; } catch (e) { return []; }
+  }
+  function setFavs(favs) { store("cta_favs", JSON.stringify(favs)); }
+
+  function get(url, ok, fail) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url, true);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      if (xhr.status === 200) {
+        try { ok(JSON.parse(xhr.responseText)); }
+        catch (e) { fail("Bad response"); }
+      } else {
+        var msg = "HTTP " + xhr.status;
+        try { msg = JSON.parse(xhr.responseText).detail || msg; } catch (e) {}
+        fail(msg);
+      }
+    };
+    xhr.send();
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function tickClock() {
+    var d = new Date();
+    var h = d.getHours() % 12 || 12;
+    var m = d.getMinutes();
+    clock.textContent = h + ":" + (m < 10 ? "0" : "") + m;
+  }
+
+  function showStatus(text, isErr) {
+    statusBox.className = isErr ? "error" : "";
+    statusBox.style.display = "block";
+    statusBox.innerHTML = esc(text);
+  }
+  function hideStatus() { statusBox.style.display = "none"; }
+
+  function kmBetween(lat1, lon1, lat2, lon2) {
+    var dy = (lat2 - lat1) * 110.574;
+    var dx = (lon2 - lon1) * 111.32 * Math.cos(lat1 * Math.PI / 180);
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /* ---------- station picker ---------- */
+  function openPicker() {
+    var cur = stationById[curId];
+    pickerLine = cur ? cur.lines[0] : "Red";
+    renderPicker();
+    picker.className = "open";
+  }
+  function closePicker() { picker.className = ""; }
+
+  function renderPicker() {
+    var html = "";
+    for (var i = 0; i < LINE_SEQ.length; i++) {
+      var code = LINE_SEQ[i];
+      if (!lineOrder[code]) continue;
+      var txt = code === "Y" ? "#000" : "#fff";
+      html += '<span class="ltab' + (code === pickerLine ? " active" : "")
+        + '" style="background:' + COLORS[code] + ';color:' + txt + '" data-line="' + code + '">'
+        + NAMES[code] + "</span>";
+    }
+    lineTabs.innerHTML = html;
+
+    var ids = lineOrder[pickerLine] || [];
+    var col = COLORS[pickerLine];
+    html = "";
+    for (var j = 0; j < ids.length; j++) {
+      var s = stationById[ids[j]];
+      if (!s) continue;
+      var xfer = "";
+      for (var k = 0; k < s.lines.length; k++) {
+        if (s.lines[k] === pickerLine) continue;
+        xfer += '<i style="background:' + COLORS[s.lines[k]] + '"></i>';
+      }
+      html += '<div class="stop' + (s.map_id === curId ? " cur" : "") + '" data-id="' + s.map_id
+        + '" style="border-left-color:' + col + '">'
+        + '<span class="dot" style="border-color:' + col + '"></span>'
+        + '<span class="nm">' + esc(s.name) + "</span>"
+        + (xfer ? '<span class="xfer">' + xfer + "</span>" : "")
+        + "</div>";
+    }
+    stopList.innerHTML = html;
+  }
+
+  lineTabs.onclick = function (e) {
+    var t = e.target || e.srcElement;
+    var code = t.getAttribute && t.getAttribute("data-line");
+    if (!code) return;
+    pickerLine = code;
+    renderPicker();
+  };
+  stopList.onclick = function (e) {
+    var t = e.target || e.srcElement;
+    while (t && t !== stopList && !(t.getAttribute && t.getAttribute("data-id"))) t = t.parentNode;
+    var id = t && t.getAttribute && t.getAttribute("data-id");
+    if (!id) return;
+    closePicker();
+    if (id !== curId) { curId = id; stationChanged(); }
+  };
+  stnBtn.onclick = openPicker;
+  document.getElementById("picker-close").onclick = closePicker;
+
+  function updateStationBtn() {
+    var s = stationById[curId];
+    stnBtn.innerHTML = (s ? esc(s.name) : "Pick station") + '<span class="arrow">&#9662;</span>';
+  }
+
+  /* ---------- favorites ---------- */
+  function renderFavs() {
+    var favs = getFavs();
+    favBtn.className = "hbtn" + (favs.indexOf(curId) !== -1 ? " on" : "");
+    var html = "";
+    for (var i = 0; i < favs.length; i++) {
+      var id = favs[i];
+      if (!stationById[id]) continue;
+      html += '<span class="chip' + (id === curId ? " active" : "") + '" data-id="' + id + '">'
+        + esc(stationById[id].name) + "</span>";
+    }
+    favBar.innerHTML = html;
+    favBar.style.display = html ? "" : "none";
+  }
+
+  favBar.onclick = function (e) {
+    var t = e.target || e.srcElement;
+    if (!t.getAttribute) return;
+    var id = t.getAttribute("data-id");
+    if (!id || id === curId) return;
+    curId = id;
+    stationChanged();
+  };
+
+  favBtn.onclick = function () {
+    var favs = getFavs();
+    var idx = favs.indexOf(curId);
+    if (idx === -1) favs.push(curId); else favs.splice(idx, 1);
+    setFavs(favs);
+    renderFavs();
+  };
+
+  /* ---------- geolocation ---------- */
+  function pickNearest(lat, lon) {
+    var best = null, bestD = 1e9;
+    for (var i = 0; i < stationList.length; i++) {
+      var s = stationList[i];
+      var d = kmBetween(lat, lon, s.lat, s.lon);
+      if (d < bestD) { bestD = d; best = s; }
+    }
+    return best;
+  }
+
+  function locate(silent) {
+    if (!navigator.geolocation) {
+      if (!silent) showStatus("Geolocation not supported on this device.", true);
+      return;
+    }
+    locBtn.style.color = "#2f5f9e";
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      locBtn.style.color = "";
+      var near = pickNearest(pos.coords.latitude, pos.coords.longitude);
+      if (near && near.map_id !== curId) {
+        curId = near.map_id;
+        stationChanged();
+      }
+    }, function (err) {
+      locBtn.style.color = "";
+      if (!silent) showStatus("Location unavailable: " + err.message, true);
+    }, { timeout: 8000, maximumAge: 300000 });
+  }
+  locBtn.onclick = function () { locate(false); };
+
+  /* ---------- walk-time setting ---------- */
+  var walkPop = document.getElementById("walk-pop");
+  var walkBtn = document.getElementById("walk-btn");
+  function paintWalk() {
+    document.getElementById("wp-val").textContent = walkMin > 0 ? walkMin + " min" : "off";
+    walkBtn.style.color = walkMin > 0 ? "#7dd3fc" : "";
+    walkBtn.innerHTML = walkMin > 0 ? "&#128694;" + walkMin : "&#128694;";
+  }
+  paintWalk();
+  walkBtn.onclick = function () {
+    walkPop.style.display = walkPop.style.display === "block" ? "none" : "block";
+  };
+  function bumpWalk(dir) {
+    walkMin = Math.max(0, Math.min(60, walkMin + dir));
+    store("cta_walk", String(walkMin));
+    paintWalk();
+    if (lastArrivals && lastArrivalsFor === curId) renderBoard(lastArrivals);
+  }
+  document.getElementById("wp-minus").onclick = function () { bumpWalk(-1); };
+  document.getElementById("wp-plus").onclick = function () { bumpWalk(1); };
+
+  /* ---------- doubtful-train toggle ---------- */
+  var unsureBtn = document.getElementById("unsure-toggle");
+  function paintUnsureBtn() { unsureBtn.className = "hbtn" + (showUnsure ? " on" : ""); }
+  paintUnsureBtn();
+  unsureBtn.onclick = function () {
+    showUnsure = !showUnsure;
+    store("cta_unsure", showUnsure ? "1" : "0");
+    paintUnsureBtn();
+    if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals);
+  };
+
+  /* ---------- arrivals board ---------- */
+  function rowHtml(a) {
+    var color = BADGE[a.route] || "#555";
+    var textCol = a.route === "Y" ? "#000" : "#fff";
+    var etaCls = a.delayed ? " delayed" : (a.approaching || a.min <= 1 ? " due" : (a.scheduled ? " sched" : ""));
+    var minTxt = a.delayed ? "dly" : (a.approaching || a.min <= 1 ? "Due" : a.min + "m");
+    // leave-by: minutes until you must walk out the door to catch this train
+    var leave = "";
+    if (walkMin > 0 && !a.delayed) {
+      var lm = a.min - walkMin;
+      if (lm <= 0 && a.min >= walkMin - 1) leave = '<span class="cell c-leave now">go now</span>';
+      else if (lm < 0) leave = '<span class="cell c-leave missed">&#10005;</span>';
+      else leave = '<span class="cell c-leave">&#128694;' + lm + "m</span>";
+    }
+    return '<div class="row">'
+      + '<div class="badge" style="background:' + color + ';color:' + textCol + '">' + esc(NAMES[a.route] || a.route) + "</div>"
+      + '<div class="dest">' + esc(a.dest) + (a.scheduled ? "<small>scheduled</small>" : "") + "</div>"
+      + '<span class="cell c-min' + etaCls + '">' + minTxt + "</span>"
+      + '<span class="cell c-at">' + (a.time ? esc(a.time) : "") + "</span>"
+      + leave
+      + "</div>";
+  }
+
+  function dirLabel(group) {
+    var seen = {}, parts = [];
+    for (var i = 0; i < group.length; i++) {
+      var d = group[i].platform || "";
+      var m = d.match(/toward\s+(.+)/i);
+      d = m ? "Toward " + m[1] : d.replace(/^Service at\s*/i, "");
+      if (d && !seen[d]) { seen[d] = 1; parts.push(d); }
+    }
+    return parts.length ? parts.join(" · ") : "Direction " + group[0].dir;
+  }
+
+  function renderBoard(arrivals) {
+    if (!arrivals.length) { board.innerHTML = ""; showStatus("No trains predicted right now."); return; }
+    hideStatus();
+    var groups = {}, order = [];
+    for (var i = 0; i < arrivals.length; i++) {
+      var key = arrivals[i].dir || "?";
+      if (!groups[key]) { groups[key] = []; order.push(key); }
+      groups[key].push(arrivals[i]);
+    }
+    order.sort();
+    var html = "";
+    for (var g = 0; g < order.length; g++) {
+      var group = groups[order[g]];
+      html += '<div class="col"><h2>' + esc(dirLabel(group)) + "</h2>";
+      for (var j = 0; j < group.length; j++) html += rowHtml(group[j]);
+      html += "</div>";
+    }
+    board.innerHTML = html;
+  }
+
+  /* ---------- map ---------- */
+  function renderMap(arrivals) {
+    var cur = stationById[curId];
+    if (!cur) { mapEl.innerHTML = ""; return; }
+    var w = mapEl.clientWidth, h = mapEl.clientHeight;
+    if (!w || !h) return;
+    var cx = w / 2, cy = h / 2;
+
+    var trains = [];
+    var nearestByDir = {};
+    for (var i = 0; i < arrivals.length; i++) {
+      var a = arrivals[i];
+      if (a.lat == null || a.lon == null) continue;
+      var d = kmBetween(cur.lat, cur.lon, a.lat, a.lon);
+      // doubtful data: scheduled entries carry phantom positions, and a train
+      // "at" the station with a 5+ minute ETA contradicts itself
+      var suspect = a.scheduled || (d < 0.4 && a.min > 4);
+      if (suspect && !showUnsure) continue;
+      trains.push({ a: a, d: d, suspect: suspect });
+      if (suspect) continue; // never let doubtful trains drive the zoom level
+      var dk = a.dir || "?";
+      if (!(dk in nearestByDir) || d < nearestByDir[dk]) nearestByDir[dk] = d;
+    }
+    // zoom level: ALWAYS fit the closest train from each direction, however far
+    var need = 0;
+    for (var dk2 in nearestByDir) if (nearestByDir[dk2] > need) need = nearestByDir[dk2];
+    var radius = need ? Math.max(1.5, need * 1.25) : 3;
+    // sticky zoom: ignore small radius wobbles between refreshes so the whole
+    // map doesn't rescale every 10s — but never stick to a level that would
+    // push the nearest incoming trains off screen
+    if (!zoomPending && lastRadiusFor === curId && lastRadius
+        && lastRadius >= need * 1.1
+        && Math.abs(radius - lastRadius) / lastRadius < 0.25) {
+      radius = lastRadius;
+    }
+    lastRadius = radius; lastRadiusFor = curId;
+    var half = Math.min(cx, cy) - 24;
+    var scale = half / radius;
+
+    function px(lat, lon) {
+      var dx = (lon - cur.lon) * 111.32 * Math.cos(cur.lat * Math.PI / 180);
+      var dy = (lat - cur.lat) * 110.574;
+      return [cx + dx * scale, cy - dy * scale];
+    }
+
+    // px-space copy of every route's track: `draw` keeps the raw segments
+    // (stripe corridor-matching relies on their geometry identity), `walk` is
+    // those segments stitched into continuous chains so trains bend through
+    // every corner instead of stopping at segment joints
+    function withCum(pts) {
+      var cum = [0];
+      for (var i = 1; i < pts.length; i++) {
+        var dx = pts[i][0] - pts[i - 1][0], dy = pts[i][1] - pts[i - 1][1];
+        cum.push(cum[i - 1] + Math.sqrt(dx * dx + dy * dy));
+      }
+      return { pts: pts, cum: cum };
+    }
+    function stitchSegs(segs) {
+      var joints = {};
+      function jkey(p) { return Math.round(p[0]) + "|" + Math.round(p[1]); }
+      for (var s = 0; s < segs.length; s++) {
+        var pts = segs[s].pts;
+        var k0 = jkey(pts[0]), k1 = jkey(pts[pts.length - 1]);
+        (joints[k0] = joints[k0] || []).push({ si: s, end: 0 });
+        (joints[k1] = joints[k1] || []).push({ si: s, end: 1 });
+      }
+      var used = {}, chains = [];
+      function nextAt(key, notSi) {
+        var ends = joints[key] || [];
+        if (ends.length !== 2) return null; // junction or dead end: stop
+        for (var e = 0; e < ends.length; e++) {
+          if (ends[e].si !== notSi && !used[ends[e].si]) return ends[e];
+        }
+        return null;
+      }
+      for (var s2 = 0; s2 < segs.length; s2++) {
+        if (used[s2]) continue;
+        used[s2] = 1;
+        var chain = segs[s2].pts.slice();
+        var lastSi = s2;
+        while (true) { // grow at tail
+          var hop = nextAt(jkey(chain[chain.length - 1]), lastSi);
+          if (!hop) break;
+          used[hop.si] = 1;
+          var add = segs[hop.si].pts;
+          if (hop.end === 0) { for (var a = 1; a < add.length; a++) chain.push(add[a]); }
+          else { for (var b = add.length - 2; b >= 0; b--) chain.push(add[b]); }
+          lastSi = hop.si;
+        }
+        lastSi = s2;
+        while (true) { // grow at head
+          var hop2 = nextAt(jkey(chain[0]), lastSi);
+          if (!hop2) break;
+          used[hop2.si] = 1;
+          var add2 = segs[hop2.si].pts;
+          if (hop2.end === 1) { for (var c2 = add2.length - 2; c2 >= 0; c2--) chain.unshift(add2[c2]); }
+          else { for (var d2 = 1; d2 < add2.length; d2++) chain.unshift(add2[d2]); }
+          lastSi = hop2.si;
+        }
+        chains.push(withCum(chain));
+      }
+      return chains;
+    }
+    trackPx = {};
+    if (trackRoutes) {
+      for (var tr0 in trackRoutes) {
+        var out = [];
+        var srcSegs = trackRoutes[tr0];
+        for (var s0 = 0; s0 < srcSegs.length; s0++) {
+          var seg0 = srcSegs[s0], pts0 = [];
+          for (var p0 = 0; p0 < seg0.length; p0++) pts0.push(px(seg0[p0][0], seg0[p0][1]));
+          out.push(withCum(pts0));
+        }
+        trackPx[tr0] = { draw: out, walk: stitchSegs(out) };
+      }
+    }
+
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">';
+
+    // distance rings (fixed; fade in after the zoom lands)
+    var ringsOp = zoomPending ? 0 : 1;
+    var rings = [radius / 2, radius];
+    svg += '<g id="rings" opacity="' + ringsOp + '">';
+    for (var r = 0; r < rings.length; r++) {
+      var km = rings[r];
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (km * scale)
+        + '" fill="none" stroke="#1e2430" stroke-width="1"/>'
+        + '<text x="' + (cx + 4) + '" y="' + (cy - km * scale + 14)
+        + '" fill="#4b5568" font-size="11">' + (Math.round(km * 0.621371 * 10) / 10) + ' mi</text>';
+    }
+    svg += "</g>";
+
+    svg += '<g id="zoomG">';
+
+    function segmentPath(segPx) {
+      var pts = "";
+      for (var i = 0; i < segPx.pts.length; i++) {
+        pts += (i ? " " : "") + Math.round(segPx.pts[i][0]) + "," + Math.round(segPx.pts[i][1]);
+      }
+      return pts;
+    }
+    if (trackRoutes) {
+      var route, segs, k;
+      // whole network in grey
+      for (route in trackPx) {
+        if (cur.lines.indexOf(route) !== -1) continue;
+        segs = trackPx[route].draw;
+        for (k = 0; k < segs.length; k++) {
+          svg += '<polyline points="' + segmentPath(segs[k]) + '" fill="none" stroke="#252d3b" stroke-width="2"/>';
+        }
+      }
+      // this station's lines in color; corridors shared by several of them get
+      // stacked ribbon strokes (widest first) so every color stays visible
+      var byGeom = {}, geomOrder = [];
+      for (var c = 0; c < cur.lines.length; c++) {
+        route = cur.lines[c];
+        segs = (trackPx[route] || {}).draw || [];
+        for (k = 0; k < segs.length; k++) {
+          var pts2 = segmentPath(segs[k]);
+          if (!byGeom[pts2]) { byGeom[pts2] = { routes: [], seg: segs[k] }; geomOrder.push(pts2); }
+          byGeom[pts2].routes.push(route);
+        }
+      }
+      // shared corridors: parallel colored lines side by side, transit-map style.
+      // offset each route's copy perpendicular to the local track direction
+      function offsetPts(pts, off) {
+        var out = [];
+        for (var i = 0; i < pts.length; i++) {
+          var pA = pts[i > 0 ? i - 1 : i], pB = pts[i < pts.length - 1 ? i + 1 : i];
+          var dx = pB[0] - pA[0], dy = pB[1] - pA[1];
+          var len = Math.sqrt(dx * dx + dy * dy) || 1;
+          out.push([pts[i][0] - (dy / len) * off, pts[i][1] + (dx / len) * off]);
+        }
+        return out;
+      }
+      function pathStr(pts) {
+        var s3 = "";
+        for (var i = 0; i < pts.length; i++) {
+          s3 += (i ? " " : "") + Math.round(pts[i][0] * 10) / 10 + "," + Math.round(pts[i][1] * 10) / 10;
+        }
+        return s3;
+      }
+      var SPACING = 5;
+      for (var gi = 0; gi < geomOrder.length; gi++) {
+        var entry = byGeom[geomOrder[gi]];
+        var shared = entry.routes;
+        // consistent color order so lines flow continuously across segments
+        shared.sort(function (x, y) { return LINE_SEQ.indexOf(x) - LINE_SEQ.indexOf(y); });
+        for (var si = 0; si < shared.length; si++) {
+          var off = (si - (shared.length - 1) / 2) * SPACING;
+          var pl = off === 0 ? entry.seg.pts : offsetPts(entry.seg.pts, off);
+          svg += '<polyline points="' + pathStr(pl) + '" fill="none" stroke="' + (COLORS[shared[si]] || "#888")
+            + '" stroke-width="4.5" stroke-linecap="round" opacity="0.9"/>';
+        }
+      }
+    }
+
+    // stations, each with a small grey name
+    for (var s = 0; s < stationList.length; s++) {
+      var st = stationList[s];
+      if (st.map_id === cur.map_id) continue;
+      var p2 = px(st.lat, st.lon);
+      svg += '<circle cx="' + p2[0] + '" cy="' + p2[1] + '" r="2.5" fill="#4b5568"/>'
+        + '<text x="' + p2[0] + '" y="' + (p2[1] + 12) + '" fill="#565f6e" font-size="9.5" text-anchor="middle">'
+        + esc(st.name) + "</text>";
+    }
+
+    // grey ambient layer: every other live train nearby (not bound for us)
+    var activeRuns = {};
+    for (var ar = 0; ar < arrivals.length; ar++) activeRuns[arrivals[ar].run] = 1;
+    if (lastPositions) {
+      for (var bp = 0; bp < lastPositions.length; bp++) {
+        var bt = lastPositions[bp];
+        if (activeRuns[bt.run]) continue;
+        var bd = kmBetween(cur.lat, cur.lon, bt.lat, bt.lon);
+        if (bd > radius * 1.6) continue; // keep the DOM small
+        trains.push({ a: bt, d: bd, suspect: false, bg: true });
+      }
+    }
+
+    // trains — dead-reckoned between API updates; cars snapped onto the track
+    animTrains = [];
+    animProject = { px: px, radius: radius, cur: cur, scale: scale, cx: cx, cy: cy };
+    for (var t = 0; t < trains.length; t++) {
+      var a2 = trains[t].a;
+      var d2 = trains[t].d;
+      var bg = !!trains[t].bg;
+      var col = bg ? "#39424f" : (COLORS[a2.route] || "#888");
+      var speed;
+      if (bg) {
+        speed = a2.heading == null ? 0 : 0.012; // typical cruise, km/s
+      } else {
+        var etaSec = Math.max(45, (a2.min || 0) * 60);
+        // damp the estimate: trains dwell at stops, so raw distance/ETA
+        // overshoots and forces backward corrections later
+        speed = a2.heading == null ? 0 : Math.min(0.03, (d2 / etaSec) * 0.8);
+      }
+      var rad = (a2.heading || 0) * Math.PI / 180;
+      var cars = CARS[a2.route] || 6;
+      animTrains.push({
+        a: a2, d: bg ? 1e9 : d2, speed: speed,
+        sinH: Math.sin(rad), cosH: Math.cos(rad),
+        pos: t % 4, suspect: trains[t].suspect, bg: bg, cars: cars
+      });
+      var body = "";
+      var carStroke = bg ? "#5a6474" : "#f2f4f8";
+      for (var ci = 0; ci < cars; ci++) {
+        body += '<rect id="trg' + t + 'c' + ci + '" x="-4.5" y="-4" width="9" height="8" rx="2.2" fill="' + col
+          + '" stroke="' + carStroke + '" stroke-width="1.2"/>';
+      }
+      body += '<circle id="trg' + t + 'h" r="2.4" fill="' + (bg ? "#78828f" : "#fff7cc") + '"/>';
+      svg += '<g id="trg' + t + '" opacity="0">' + body + "</g>";
+      if (!bg) {
+        var anchorAttr = t % 4 < 2 ? "" : ' text-anchor="end"';
+        var label = a2.delayed ? "dly" : (a2.approaching || a2.min <= 1 ? "due" : a2.min + "m");
+        if (trains[t].suspect) label += "?";
+        if (a2.heading != null) { // travel-direction arrow
+          var ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+          label = ARROWS[Math.round(a2.heading / 45) % 8] + label;
+        }
+        svg += '<text id="trl' + t + '" x="0" y="0" fill="#e8eaf0" font-size="13"' + anchorAttr + ">" + label + "</text>";
+      }
+    }
+
+    svg += "</g>";
+
+    // current station — static bullseye, fixed at center
+    svg += '<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="#e8eaf0" stroke-width="1.5" opacity="0.45"/>'
+      + '<circle cx="' + cx + '" cy="' + cy + '" r="8" fill="#e8eaf0" stroke="#0b0e14" stroke-width="2"/>'
+      + '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="#0b0e14"/>'
+      + '<text x="' + cx + '" y="' + (cy + 30) + '" fill="#e8eaf0" font-size="15" font-weight="bold" text-anchor="middle">'
+      + esc(cur.name) + "</text>";
+
+    svg += "</svg>";
+    mapEl.innerHTML = svg;
+    if (zoomPending) zooming = true; // unclamped placement from the very first frame
+    placeTrains();
+
+    if (zoomPending) {
+      zoomPending = false;
+      playZoomIn(cx, cy, radius);
+    }
+  }
+
+  function systemRadiusFrom(cur) {
+    var systemR = 0;
+    for (var i = 0; i < stationList.length; i++) {
+      var d = kmBetween(cur.lat, cur.lon, stationList[i].lat, stationList[i].lon);
+      if (d > systemR) systemR = d;
+    }
+    return systemR;
+  }
+
+  function ease(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+  function animateZoom(g, cx, cy, kFrom, kTo, dur, done) {
+    if (zoomTimer) clearInterval(zoomTimer);
+    zooming = true;
+    var t0 = Date.now();
+    function apply(k) {
+      g.setAttribute("transform", "translate(" + (cx * (1 - k)) + "," + (cy * (1 - k)) + ") scale(" + k + ")");
+    }
+    apply(kFrom);
+    zoomTimer = setInterval(function () {
+      var t = Math.min(1, (Date.now() - t0) / dur);
+      apply(kFrom + (kTo - kFrom) * ease(t));
+      if (t >= 1) {
+        clearInterval(zoomTimer);
+        zoomTimer = null;
+        done();
+      }
+    }, 33);
+  }
+
+  function playZoomIn(cx, cy, radius) {
+    var cur = stationById[curId];
+    var g = document.getElementById("zoomG");
+    var ringsG = document.getElementById("rings");
+    if (!g) { zooming = false; return; }
+    var k0 = radius / (systemRadiusFrom(cur) * 1.1 + 1);
+    if (ringsG) ringsG.setAttribute("opacity", "0");
+    animateZoom(g, cx, cy, k0, 1, 1800, function () {
+      zooming = false;
+      g.removeAttribute("transform");
+      if (ringsG) ringsG.setAttribute("opacity", "1");
+      placeTrains(); // hide out-of-view trains immediately
+    });
+  }
+
+  // smooth pull-back from the old station before flying into the new one
+  function playZoomOut(done) {
+    var g = document.getElementById("zoomG");
+    if (!g || !animProject) { done(); return; }
+    var p = animProject;
+    var k1 = p.radius / (systemRadiusFrom(p.cur) * 1.1 + 1);
+    var ringsG = document.getElementById("rings");
+    if (ringsG) ringsG.setAttribute("opacity", "0");
+    placeTrains(); // unclamp/reveal true positions before pulling back
+    animateZoom(g, p.cx, p.cy, 1, k1, 1100, done);
+  }
+
+  function placeTrains() {
+    if (!animProject) return;
+    var px = animProject.px, radius = animProject.radius, cur = animProject.cur;
+    var elapsed = (Date.now() - lastFetch) / 1000;
+    var STEP = 11;  // car length + gap, px along the rail
+    var LANE = 8;   // sideways offset so trains don't cover their line
+
+    // nearest point on any of the route's track segments (px space)
+    function snapToTrack(route, p) {
+      var segs = trackPx && trackPx[route] && trackPx[route].walk;
+      if (!segs) return null;
+      var best = null;
+      for (var s = 0; s < segs.length; s++) {
+        var pts = segs[s].pts, cum = segs[s].cum;
+        for (var i = 0; i < pts.length - 1; i++) {
+          var ax = pts[i][0], ay = pts[i][1];
+          var bx = pts[i + 1][0], by = pts[i + 1][1];
+          var abx = bx - ax, aby = by - ay;
+          var ab2 = abx * abx + aby * aby;
+          if (!ab2) continue;
+          var tt = ((p[0] - ax) * abx + (p[1] - ay) * aby) / ab2;
+          tt = tt < 0 ? 0 : (tt > 1 ? 1 : tt);
+          var qx = ax + tt * abx, qy = ay + tt * aby;
+          var dx = p[0] - qx, dy = p[1] - qy;
+          var d2 = dx * dx + dy * dy;
+          if (!best || d2 < best.d2) {
+            best = { d2: d2, seg: segs[s], ci: s, arc: cum[i] + tt * Math.sqrt(ab2) };
+          }
+        }
+      }
+      return best;
+    }
+
+    // point + tangent angle at arc-length s along a segment
+    function pointAtArc(seg, s) {
+      var pts = seg.pts, cum = seg.cum;
+      var total = cum[cum.length - 1];
+      s = s < 0 ? 0 : (s > total ? total : s);
+      var i = 1;
+      while (i < cum.length - 1 && cum[i] < s) i++;
+      var span = cum[i] - cum[i - 1] || 1;
+      var tt = (s - cum[i - 1]) / span;
+      var ax = pts[i - 1][0], ay = pts[i - 1][1];
+      var bx = pts[i][0], by = pts[i][1];
+      return {
+        x: ax + tt * (bx - ax), y: ay + tt * (by - ay),
+        ang: Math.atan2(by - ay, bx - ax) * 180 / Math.PI,
+        tx: bx - ax, ty: by - ay
+      };
+    }
+
+    var scale = animProject.scale, ccx = animProject.cx, ccy = animProject.cy;
+    for (var t = 0; t < animTrains.length; t++) {
+      var tr = animTrains[t];
+      var g = document.getElementById("trg" + t);
+      if (!g) return;
+      var travel = Math.min(tr.speed * elapsed, tr.d); // never overshoot the station
+      var lat = tr.a.lat + (tr.cosH * travel) / 110.574;
+      var lon = tr.a.lon + (tr.sinH * travel) / (111.32 * Math.cos(tr.a.lat * Math.PI / 180));
+      var key = tr.a.route + "_" + (tr.a.run || t);
+      var tpT = px(lat, lon);
+      var snap = tr.a.heading == null ? null : snapToTrack(tr.a.route, tpT);
+      var tp, d, op, n = tr.cars;
+
+      if (snap && snap.d2 < 900) { // within 30px of its rail
+        // rail-space smoothing: the train IS an arc position along its chain
+        // (stored in km so zoom rescales don't reset it) and that position
+        // only ever advances in the direction of travel — backward API
+        // corrections become a pause, never a reverse.
+        var atT = pointAtArc(snap.seg, snap.arc);
+        var hx = tr.sinH, hy = -tr.cosH;
+        var sign = (atT.tx * hx + atT.ty * hy) >= 0 ? 1 : -1;
+        var targetKm = snap.arc / scale;
+        var st = dispState[key];
+        if (!st || st.ci !== snap.ci || st.arcKm == null || Math.abs(targetKm - st.arcKm) > 0.6) {
+          st = dispState[key] = { ci: snap.ci, arcKm: targetKm };
+        } else {
+          var fwdKm = (targetKm - st.arcKm) * sign;
+          if (fwdKm > 0) st.arcKm += sign * fwdKm * 0.15; // ease forward; behind = hold
+        }
+        var arcPx = st.arcKm * scale;
+        var at0 = pointAtArc(snap.seg, arcPx);
+        tp = [at0.x, at0.y];
+        d = Math.sqrt(Math.pow(tp[0] - ccx, 2) + Math.pow(tp[1] - ccy, 2)) / scale;
+        op = (!zooming && !showUnsure && d > radius * 1.02) ? "0"
+          : (tr.suspect || d > radius * 1.02 ? "0.45" : (tr.bg ? "0.6" : "1"));
+        g.setAttribute("opacity", op);
+        if (op !== "0") {
+          // ride beside the line (right of travel) so the track stays visible
+          for (var ci = 0; ci < n; ci++) {
+            var off = (ci - (n - 1) / 2) * STEP;
+            var atc = pointAtArc(snap.seg, arcPx + sign * off);
+            var tl = Math.sqrt(atc.tx * atc.tx + atc.ty * atc.ty) || 1;
+            var rx = -sign * atc.ty / tl * LANE, ry = sign * atc.tx / tl * LANE;
+            document.getElementById("trg" + t + "c" + ci).setAttribute(
+              "transform", "translate(" + (atc.x + rx) + "," + (atc.y + ry) + ") rotate(" + atc.ang + ")");
+          }
+          var nose = pointAtArc(snap.seg, arcPx + sign * ((n / 2) * STEP + 1));
+          var tn = Math.sqrt(nose.tx * nose.tx + nose.ty * nose.ty) || 1;
+          document.getElementById("trg" + t + "h").setAttribute(
+            "transform", "translate(" + (nose.x - sign * nose.ty / tn * LANE) + "," + (nose.y + sign * nose.tx / tn * LANE) + ")");
+        }
+      } else { // off-rail fallback: straight consist at the reckoned position
+        if (dispState[key]) delete dispState[key]; // rail state no longer valid
+        tp = tpT;
+        d = kmBetween(cur.lat, cur.lon, lat, lon);
+        op = (!zooming && !showUnsure && d > radius * 1.02) ? "0"
+          : (tr.suspect || d > radius * 1.02 ? "0.45" : (tr.bg ? "0.6" : "1"));
+        g.setAttribute("opacity", op);
+        if (op !== "0") {
+          var angle = tr.a.heading == null ? 0 : tr.a.heading - 90;
+          var sinA = Math.sin(angle * Math.PI / 180), cosA = Math.cos(angle * Math.PI / 180);
+          var lx = tr.cosH * LANE, ly = tr.sinH * LANE; // right of travel
+          for (var cj = 0; cj < n; cj++) {
+            var off2 = (cj - (n - 1) / 2) * STEP;
+            document.getElementById("trg" + t + "c" + cj).setAttribute(
+              "transform", "translate(" + (tp[0] + off2 * cosA + lx) + "," + (tp[1] + off2 * sinA + ly)
+              + ") rotate(" + angle + ")");
+          }
+          document.getElementById("trg" + t + "h").setAttribute(
+            "transform", "translate(" + (tp[0] + ((n / 2) * STEP + 1) * cosA + lx) + "," + (tp[1] + ((n / 2) * STEP + 1) * sinA + ly) + ")");
+        }
+      }
+
+      var lb = document.getElementById("trl" + t);
+      if (lb) {
+        lb.setAttribute("x", tp[0] + (tr.pos < 2 ? 14 : -14));
+        lb.setAttribute("y", tp[1] + (tr.pos % 2 ? -13 : 15));
+        lb.setAttribute("opacity", op);
+      }
+    }
+  }
+
+  /* ---------- refresh loop ---------- */
+  function refresh() {
+    if (!curId) return;
+    var forId = curId;
+    get("/api/positions", function (data) {
+      lastPositions = data.trains; // picked up by the next arrivals-driven render
+    }, function () { /* ambient layer is optional */ });
+    get("/api/arrivals?mapid=" + forId, function (data) {
+      lastArrivals = data.arrivals;
+      lastArrivalsFor = forId;
+      lastFetch = Date.now();
+      if (forId !== curId) return; // stale response, user already moved on
+      renderBoard(data.arrivals);
+      if (!zooming) renderMap(data.arrivals);
+    }, function (msg) {
+      if (forId !== curId) return;
+      showStatus(msg, true);
+    });
+  }
+
+  function startPolling() {
+    if (timer) clearInterval(timer);
+    refresh();
+    timer = setInterval(refresh, 10000);
+  }
+
+  setInterval(placeTrains, 500); // keep trains crawling between fetches
+
+  function stationChanged() {
+    store("cta_mapid", curId);
+    updateStationBtn();
+    renderFavs();
+    board.innerHTML = "";
+    showStatus("Loading…");
+    zoomPending = true;
+    var hadMap = animProject && document.getElementById("zoomG");
+    startPolling(); // fetch new station in parallel with the pull-back
+    if (hadMap) {
+      playZoomOut(function () {
+        zooming = false;
+        if (lastArrivalsFor === curId && lastArrivals) renderMap(lastArrivals);
+        // else: zoomPending stays set; the in-flight fetch renders on arrival
+      });
+    }
+  }
+
+  window.onresize = function () { if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals); };
+
+  get("/api/stations?v=3", function (data) {
+    stationList = data.stations;
+    lineOrder = data.line_order;
+    for (var i = 0; i < stationList.length; i++) stationById[stationList[i].map_id] = stationList[i];
+    var saved = read("cta_mapid");
+    curId = (saved && stationById[saved]) ? saved : stationList[0].map_id;
+    updateStationBtn();
+    renderFavs();
+    showStatus("Loading…");
+    zoomPending = true;
+    startPolling();
+    if (!saved) locate(true);
+  }, function (msg) {
+    showStatus("Failed to load stations: " + msg, true);
+  });
+
+  get("/api/lines", function (data) {
+    trackRoutes = data.routes;
+    if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals);
+  }, function () { /* map still works without tracks */ });
+
+  tickClock();
+  setInterval(tickClock, 5000);
+})();
+</script>
+</body>
+</html>
