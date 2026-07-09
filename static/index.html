@@ -310,13 +310,21 @@
   var animTrains = [];
   var animProject = null;
   var timer = null;
+  var posTimer = null;
+  var animRAF = null;
+  var lastFrameT = 0;
   var zoomTimer = null;
   var zooming = false;
   var zoomPending = false;
   var showUnsure = read("cta_unsure") === "1";
   var walkMin = parseInt(read("cta_walk"), 10) || 0; // minutes to walk to the station
-  var dispState = {}; // per-run smoothed display positions, survives map rebuilds
+  var trainState = {}; // per-run motion state, keyed by run number; survives rebuilds
   var lastRadius = 0, lastRadiusFor = null; // sticky zoom level between refreshes
+
+  // motion tuning (speeds in km/s along the track; ~0.025 km/s ≈ 90 km/h)
+  var V_MAX = 0.028, V_DEFAULT = 0.012, V_STOP = 0.0015;
+  var RECONCILE_TAU = 5;   // seconds to gently absorb a position correction
+  var HARD_RESYNC_KM = 0.6; // teleport only if reality is this far from the display
 
   function store(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
   function read(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
@@ -580,8 +588,49 @@
     board.innerHTML = html;
   }
 
+  /* ---------- track geometry (px space, rebuilt each render) ---------- */
+  // point + tangent at arc-length s along a chain; binary search keeps it cheap
+  // enough to run every animation frame for every car
+  function pointAtArc(seg, s) {
+    var cum = seg.cum, pts = seg.pts;
+    if (s <= 0) s = 0; else if (s >= seg.total) s = seg.total;
+    var lo = 0, hi = cum.length - 1;
+    while (lo < hi) { var mid = (lo + hi + 1) >> 1; if (cum[mid] <= s) lo = mid; else hi = mid - 1; }
+    if (lo >= cum.length - 1) lo = cum.length - 2;
+    if (lo < 0) lo = 0;
+    var span = cum[lo + 1] - cum[lo] || 1;
+    var tt = (s - cum[lo]) / span;
+    var ax = pts[lo][0], ay = pts[lo][1], bx = pts[lo + 1][0], by = pts[lo + 1][1];
+    return { x: ax + tt * (bx - ax), y: ay + tt * (by - ay),
+      ang: Math.atan2(by - ay, bx - ax) * 180 / Math.PI, tx: bx - ax, ty: by - ay };
+  }
+
+  // nearest chain + arc-length for a px point (used once per data update, not per frame)
+  function snapToTrack(route, p) {
+    var chains = trackPx && trackPx[route] && trackPx[route].walk;
+    if (!chains) return null;
+    var best = null;
+    for (var s = 0; s < chains.length; s++) {
+      var pts = chains[s].pts, cum = chains[s].cum;
+      for (var i = 0; i < pts.length - 1; i++) {
+        var ax = pts[i][0], ay = pts[i][1];
+        var abx = pts[i + 1][0] - ax, aby = pts[i + 1][1] - ay;
+        var ab2 = abx * abx + aby * aby;
+        if (!ab2) continue;
+        var tt = ((p[0] - ax) * abx + (p[1] - ay) * aby) / ab2;
+        tt = tt < 0 ? 0 : (tt > 1 ? 1 : tt);
+        var dx = p[0] - (ax + tt * abx), dy = p[1] - (ay + tt * aby);
+        var d2 = dx * dx + dy * dy;
+        if (!best || d2 < best.d2) {
+          best = { d2: d2, chainIdx: s, seg: chains[s], arc: cum[i] + tt * Math.sqrt(ab2) };
+        }
+      }
+    }
+    return best;
+  }
+
   /* ---------- map ---------- */
-  function renderMap(arrivals) {
+  function renderMap(arrivals, fresh) {
     var cur = stationById[curId];
     if (!cur) { mapEl.innerHTML = ""; return; }
     var w = mapEl.clientWidth, h = mapEl.clientHeight;
@@ -635,7 +684,7 @@
         var dx = pts[i][0] - pts[i - 1][0], dy = pts[i][1] - pts[i - 1][1];
         cum.push(cum[i - 1] + Math.sqrt(dx * dx + dy * dy));
       }
-      return { pts: pts, cum: cum };
+      return { pts: pts, cum: cum, total: cum[cum.length - 1] };
     }
     function stitchSegs(segs) {
       var joints = {};
@@ -800,33 +849,48 @@
       }
     }
 
-    // trains — dead-reckoned between API updates; cars snapped onto the track
+    // trains: bind each to a position along its track chain, then let the
+    // animation loop glide it. Snapping happens here (once per data update),
+    // never per frame.
     animTrains = [];
     animProject = { px: px, radius: radius, cur: cur, scale: scale, cx: cx, cy: cy };
+    var ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
     for (var t = 0; t < trains.length; t++) {
       var a2 = trains[t].a;
-      var d2 = trains[t].d;
       var bg = !!trains[t].bg;
       var col = bg ? "#39424f" : (COLORS[a2.route] || "#888");
-      var speed;
-      if (bg) {
-        speed = a2.heading == null ? 0 : 0.012; // typical cruise, km/s
-      } else {
-        var etaSec = Math.max(45, (a2.min || 0) * 60);
-        // damp the estimate: trains dwell at stops, so raw distance/ETA
-        // overshoots and forces backward corrections later
-        speed = a2.heading == null ? 0 : Math.min(0.03, (d2 / etaSec) * 0.8);
-      }
+      var nCars = CARS[a2.route] || 6;
       var rad = (a2.heading || 0) * Math.PI / 180;
-      var cars = CARS[a2.route] || 6;
-      animTrains.push({
-        a: a2, d: bg ? 1e9 : d2, speed: speed,
-        sinH: Math.sin(rad), cosH: Math.cos(rad),
-        pos: t % 4, suspect: trains[t].suspect, bg: bg, cars: cars
-      });
-      var body = "";
-      var carStroke = bg ? "#5a6474" : "#f2f4f8";
-      for (var ci = 0; ci < cars; ci++) {
+      var sinH = Math.sin(rad), cosH = Math.cos(rad);
+      var run = a2.run || ("t" + t);
+
+      var snap = a2.heading == null ? null : snapToTrack(a2.route, px(a2.lat, a2.lon));
+      var onTrack = !!(snap && snap.d2 < 900);
+      var meta = {
+        run: run, bg: bg, suspect: trains[t].suspect, nCars: nCars, pos: t % 4,
+        onTrack: onTrack, seg: null, chainIdx: -1, dir: 1,
+        lat: a2.lat, lon: a2.lon, sinH: sinH, cosH: cosH, heading: a2.heading,
+        gEl: null, carEls: [], headEl: null, labelEl: null
+      };
+      if (onTrack) {
+        var at = pointAtArc(snap.seg, snap.arc);
+        var dir = (at.tx * sinH + at.ty * (-cosH)) >= 0 ? 1 : -1;
+        var reportFrac = snap.arc / (snap.seg.total || 1);
+        meta.seg = snap.seg; meta.chainIdx = snap.chainIdx; meta.dir = dir;
+        var st = trainState[run];
+        if (fresh || !st || st.offTrack) {
+          updateTrainTarget(run, snap.chainIdx, reportFrac, dir, snap.seg, bg);
+        } else if (st.chainIdx !== snap.chainIdx) { // moved to a new chain: rebind
+          st.chainIdx = snap.chainIdx; st.frac = reportFrac; st.tgtFrac = reportFrac; st.dir = dir;
+        } else { st.dir = dir; }
+      } else if (fresh || !trainState[run]) {
+        trainState[run] = { offTrack: true, lat: a2.lat, lon: a2.lon, sinH: sinH, cosH: cosH,
+          vKms: a2.heading == null ? 0 : V_DEFAULT, tgtTime: lastFetch || 0 };
+      }
+      animTrains.push(meta);
+
+      var body = "", carStroke = bg ? "#5a6474" : "#f2f4f8";
+      for (var ci = 0; ci < nCars; ci++) {
         body += '<rect id="trg' + t + 'c' + ci + '" x="-4.5" y="-4" width="9" height="8" rx="2.2" fill="' + col
           + '" stroke="' + carStroke + '" stroke-width="1.2"/>';
       }
@@ -836,10 +900,7 @@
         var anchorAttr = t % 4 < 2 ? "" : ' text-anchor="end"';
         var label = a2.delayed ? "dly" : (a2.approaching || a2.min <= 1 ? "due" : a2.min + "m");
         if (trains[t].suspect) label += "?";
-        if (a2.heading != null) { // travel-direction arrow
-          var ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
-          label = ARROWS[Math.round(a2.heading / 45) % 8] + label;
-        }
+        if (a2.heading != null) label = ARROWS[Math.round(a2.heading / 45) % 8] + label;
         svg += '<text id="trl' + t + '" x="0" y="0" fill="#e8eaf0" font-size="13"' + anchorAttr + ">" + label + "</text>";
       }
     }
@@ -855,8 +916,18 @@
 
     svg += "</svg>";
     mapEl.innerHTML = svg;
+    // cache element refs so the animation loop never touches getElementById
+    for (var tc = 0; tc < animTrains.length; tc++) {
+      var m = animTrains[tc];
+      m.gEl = document.getElementById("trg" + tc);
+      m.carEls = [];
+      for (var cc = 0; cc < m.nCars; cc++) m.carEls.push(document.getElementById("trg" + tc + "c" + cc));
+      m.headEl = document.getElementById("trg" + tc + "h");
+      m.labelEl = document.getElementById("trl" + tc);
+    }
     if (zoomPending) zooming = true; // unclamped placement from the very first frame
-    placeTrains();
+    paintTrains();
+    if (!animRAF) animRAF = requestAnimationFrame(animLoop);
 
     if (zoomPending) {
       zoomPending = false;
@@ -905,7 +976,7 @@
       zooming = false;
       g.removeAttribute("transform");
       if (ringsG) ringsG.setAttribute("opacity", "1");
-      placeTrains(); // hide out-of-view trains immediately
+      paintTrains(); // hide out-of-view trains immediately
     });
   }
 
@@ -917,170 +988,174 @@
     var k1 = p.radius / (systemRadiusFrom(p.cur) * 1.1 + 1);
     var ringsG = document.getElementById("rings");
     if (ringsG) ringsG.setAttribute("opacity", "0");
-    placeTrains(); // unclamp/reveal true positions before pulling back
+    paintTrains(); // reveal current positions before pulling back
     animateZoom(g, p.cx, p.cy, 1, k1, 1100, done);
   }
 
-  function placeTrains() {
+  // called once per data update: fold the fresh GPS fix into the train's
+  // smoothed velocity + target, keeping the displayed position for continuity
+  function updateTrainTarget(run, chainIdx, reportFrac, dir, seg, bg) {
+    var now = lastFetch || 0;
+    var st = trainState[run];
+    if (!st || st.offTrack || st.chainIdx !== chainIdx) {
+      trainState[run] = { chainIdx: chainIdx, frac: reportFrac, dir: dir,
+        vKms: V_DEFAULT, tgtFrac: reportFrac, tgtTime: now };
+      return;
+    }
+    var dt = Math.max(0.5, (now - st.tgtTime) / 1000);
+    var segKm = seg.total / animProject.scale;
+    var measKms = ((reportFrac - st.tgtFrac) * dir) * segKm / dt; // ground speed
+    if (measKms < 0) measKms = 0; else if (measKms > V_MAX) measKms = V_MAX;
+    st.vKms = st.vKms == null ? measKms : (st.vKms * 0.5 + measKms * 0.5); // low-pass
+    st.tgtFrac = reportFrac;
+    st.tgtTime = now;
+    st.dir = dir;
+  }
+
+  // advance every train's smoothed position by dt seconds (pure math, no DOM)
+  function advanceTrains(dt) {
+    if (!animProject) return;
+    var scale = animProject.scale;
+    for (var i = 0; i < animTrains.length; i++) {
+      var m = animTrains[i], st = trainState[m.run];
+      if (!st) continue;
+      if (st.offTrack) { // off-rail: creep along last heading
+        var v = st.vKms || 0;
+        st.lat += (st.cosH * v * dt) / 110.574;
+        st.lon += (st.sinH * v * dt) / (111.32 * Math.cos(st.lat * Math.PI / 180));
+        continue;
+      }
+      if (!m.seg) continue;
+      var segKm = m.seg.total / scale;
+      var errKm = ((st.tgtFrac - st.frac) * st.dir) * segKm; // + = reality is ahead of us
+      // only resync on a big jump (bad fix / branch change); otherwise glide
+      if (errKm > HARD_RESYNC_KM || errKm < -HARD_RESYNC_KM) { st.frac = st.tgtFrac; continue; }
+      // Structurally forward-only: effective speed is cruise nudged by the error,
+      // but the display NEVER moves backward. Behind reality → speed up (bounded).
+      // Ahead of reality → slow down (to 35% of cruise while moving, or a full
+      // stop when the train is actually dwelling) and let reality catch up.
+      var vCorr = errKm / RECONCILE_TAU;         // P-controller toward reality
+      if (vCorr > st.vKms) vCorr = st.vKms;       // cap catch-up at +100% cruise
+      var vEff = st.vKms + vCorr;
+      if (st.vKms > V_STOP) { if (vEff < 0.35 * st.vKms) vEff = 0.35 * st.vKms; } // keep gliding
+      else if (vEff < 0) vEff = 0;                // dwelling at a station: allowed to stop
+      st.frac += st.dir * (vEff / segKm) * dt;    // vEff >= 0 → forward only
+      if (st.frac < 0) st.frac = 0; else if (st.frac > 1) st.frac = 1;
+    }
+  }
+
+  // draw every train from its current smoothed state (DOM writes only)
+  function paintTrains() {
     if (!animProject) return;
     var px = animProject.px, radius = animProject.radius, cur = animProject.cur;
-    var elapsed = (Date.now() - lastFetch) / 1000;
-    var STEP = 11;  // car length + gap, px along the rail
-    var LANE = 8;   // sideways offset so trains don't cover their line
-
-    // nearest point on any of the route's track segments (px space)
-    function snapToTrack(route, p) {
-      var segs = trackPx && trackPx[route] && trackPx[route].walk;
-      if (!segs) return null;
-      var best = null;
-      for (var s = 0; s < segs.length; s++) {
-        var pts = segs[s].pts, cum = segs[s].cum;
-        for (var i = 0; i < pts.length - 1; i++) {
-          var ax = pts[i][0], ay = pts[i][1];
-          var bx = pts[i + 1][0], by = pts[i + 1][1];
-          var abx = bx - ax, aby = by - ay;
-          var ab2 = abx * abx + aby * aby;
-          if (!ab2) continue;
-          var tt = ((p[0] - ax) * abx + (p[1] - ay) * aby) / ab2;
-          tt = tt < 0 ? 0 : (tt > 1 ? 1 : tt);
-          var qx = ax + tt * abx, qy = ay + tt * aby;
-          var dx = p[0] - qx, dy = p[1] - qy;
-          var d2 = dx * dx + dy * dy;
-          if (!best || d2 < best.d2) {
-            best = { d2: d2, seg: segs[s], ci: s, arc: cum[i] + tt * Math.sqrt(ab2) };
-          }
-        }
-      }
-      return best;
-    }
-
-    // point + tangent angle at arc-length s along a segment
-    function pointAtArc(seg, s) {
-      var pts = seg.pts, cum = seg.cum;
-      var total = cum[cum.length - 1];
-      s = s < 0 ? 0 : (s > total ? total : s);
-      var i = 1;
-      while (i < cum.length - 1 && cum[i] < s) i++;
-      var span = cum[i] - cum[i - 1] || 1;
-      var tt = (s - cum[i - 1]) / span;
-      var ax = pts[i - 1][0], ay = pts[i - 1][1];
-      var bx = pts[i][0], by = pts[i][1];
-      return {
-        x: ax + tt * (bx - ax), y: ay + tt * (by - ay),
-        ang: Math.atan2(by - ay, bx - ax) * 180 / Math.PI,
-        tx: bx - ax, ty: by - ay
-      };
-    }
-
     var scale = animProject.scale, ccx = animProject.cx, ccy = animProject.cy;
+    var STEP = 11, LANE = 8;
     for (var t = 0; t < animTrains.length; t++) {
-      var tr = animTrains[t];
-      var g = document.getElementById("trg" + t);
-      if (!g) return;
-      var travel = Math.min(tr.speed * elapsed, tr.d); // never overshoot the station
-      var lat = tr.a.lat + (tr.cosH * travel) / 110.574;
-      var lon = tr.a.lon + (tr.sinH * travel) / (111.32 * Math.cos(tr.a.lat * Math.PI / 180));
-      var key = tr.a.route + "_" + (tr.a.run || t);
-      var tpT = px(lat, lon);
-      var snap = tr.a.heading == null ? null : snapToTrack(tr.a.route, tpT);
-      var tp, d, op, n = tr.cars;
+      var m = animTrains[t], st = trainState[m.run], g = m.gEl;
+      if (!g) continue;
+      var n = m.nCars, tp, d, dir, seg;
 
-      if (snap && snap.d2 < 900) { // within 30px of its rail
-        // rail-space smoothing: the train IS an arc position along its chain
-        // (stored in km so zoom rescales don't reset it) and that position
-        // only ever advances in the direction of travel — backward API
-        // corrections become a pause, never a reverse.
-        var atT = pointAtArc(snap.seg, snap.arc);
-        var hx = tr.sinH, hy = -tr.cosH;
-        var sign = (atT.tx * hx + atT.ty * hy) >= 0 ? 1 : -1;
-        var targetKm = snap.arc / scale;
-        var st = dispState[key];
-        if (!st || st.ci !== snap.ci || st.arcKm == null || Math.abs(targetKm - st.arcKm) > 0.6) {
-          st = dispState[key] = { ci: snap.ci, arcKm: targetKm };
-        } else {
-          var fwdKm = (targetKm - st.arcKm) * sign;
-          if (fwdKm > 0) st.arcKm += sign * fwdKm * 0.15; // ease forward; behind = hold
-        }
-        var arcPx = st.arcKm * scale;
-        var at0 = pointAtArc(snap.seg, arcPx);
+      if (m.onTrack && st && !st.offTrack && m.seg) {
+        seg = m.seg; dir = m.dir;
+        var arcPx = st.frac * seg.total;
+        var at0 = pointAtArc(seg, arcPx);
         tp = [at0.x, at0.y];
-        d = Math.sqrt(Math.pow(tp[0] - ccx, 2) + Math.pow(tp[1] - ccy, 2)) / scale;
-        op = (!zooming && !showUnsure && d > radius * 1.02) ? "0"
-          : (tr.suspect || d > radius * 1.02 ? "0.45" : (tr.bg ? "0.6" : "1"));
+        d = Math.sqrt((tp[0] - ccx) * (tp[0] - ccx) + (tp[1] - ccy) * (tp[1] - ccy)) / scale;
+        var op = visOp(d, radius, m);
         g.setAttribute("opacity", op);
         if (op !== "0") {
-          // ride beside the line (right of travel) so the track stays visible
           for (var ci = 0; ci < n; ci++) {
-            var off = (ci - (n - 1) / 2) * STEP;
-            var atc = pointAtArc(snap.seg, arcPx + sign * off);
+            var atc = pointAtArc(seg, arcPx + dir * (ci - (n - 1) / 2) * STEP);
             var tl = Math.sqrt(atc.tx * atc.tx + atc.ty * atc.ty) || 1;
-            var rx = -sign * atc.ty / tl * LANE, ry = sign * atc.tx / tl * LANE;
-            document.getElementById("trg" + t + "c" + ci).setAttribute(
-              "transform", "translate(" + (atc.x + rx) + "," + (atc.y + ry) + ") rotate(" + atc.ang + ")");
+            m.carEls[ci].setAttribute("transform", "translate("
+              + (atc.x - dir * atc.ty / tl * LANE) + "," + (atc.y + dir * atc.tx / tl * LANE)
+              + ") rotate(" + atc.ang + ")");
           }
-          var nose = pointAtArc(snap.seg, arcPx + sign * ((n / 2) * STEP + 1));
+          var nose = pointAtArc(seg, arcPx + dir * ((n / 2) * STEP + 1));
           var tn = Math.sqrt(nose.tx * nose.tx + nose.ty * nose.ty) || 1;
-          document.getElementById("trg" + t + "h").setAttribute(
-            "transform", "translate(" + (nose.x - sign * nose.ty / tn * LANE) + "," + (nose.y + sign * nose.tx / tn * LANE) + ")");
+          m.headEl.setAttribute("transform", "translate("
+            + (nose.x - dir * nose.ty / tn * LANE) + "," + (nose.y + dir * nose.tx / tn * LANE) + ")");
         }
-      } else { // off-rail fallback: straight consist at the reckoned position
-        if (dispState[key]) delete dispState[key]; // rail state no longer valid
-        tp = tpT;
+        paintLabel(m, tp, op);
+      } else { // off-rail: straight consist at the dead-reckoned position
+        var lat = st ? st.lat : m.lat, lon = st ? st.lon : m.lon;
+        tp = px(lat, lon);
         d = kmBetween(cur.lat, cur.lon, lat, lon);
-        op = (!zooming && !showUnsure && d > radius * 1.02) ? "0"
-          : (tr.suspect || d > radius * 1.02 ? "0.45" : (tr.bg ? "0.6" : "1"));
-        g.setAttribute("opacity", op);
-        if (op !== "0") {
-          var angle = tr.a.heading == null ? 0 : tr.a.heading - 90;
+        var op2 = visOp(d, radius, m);
+        g.setAttribute("opacity", op2);
+        if (op2 !== "0") {
+          var angle = m.heading == null ? 0 : m.heading - 90;
           var sinA = Math.sin(angle * Math.PI / 180), cosA = Math.cos(angle * Math.PI / 180);
-          var lx = tr.cosH * LANE, ly = tr.sinH * LANE; // right of travel
+          var lx = m.cosH * LANE, ly = m.sinH * LANE;
           for (var cj = 0; cj < n; cj++) {
             var off2 = (cj - (n - 1) / 2) * STEP;
-            document.getElementById("trg" + t + "c" + cj).setAttribute(
-              "transform", "translate(" + (tp[0] + off2 * cosA + lx) + "," + (tp[1] + off2 * sinA + ly)
-              + ") rotate(" + angle + ")");
+            m.carEls[cj].setAttribute("transform", "translate("
+              + (tp[0] + off2 * cosA + lx) + "," + (tp[1] + off2 * sinA + ly) + ") rotate(" + angle + ")");
           }
-          document.getElementById("trg" + t + "h").setAttribute(
-            "transform", "translate(" + (tp[0] + ((n / 2) * STEP + 1) * cosA + lx) + "," + (tp[1] + ((n / 2) * STEP + 1) * sinA + ly) + ")");
+          m.headEl.setAttribute("transform", "translate("
+            + (tp[0] + ((n / 2) * STEP + 1) * cosA + lx) + "," + (tp[1] + ((n / 2) * STEP + 1) * sinA + ly) + ")");
         }
-      }
-
-      var lb = document.getElementById("trl" + t);
-      if (lb) {
-        lb.setAttribute("x", tp[0] + (tr.pos < 2 ? 14 : -14));
-        lb.setAttribute("y", tp[1] + (tr.pos % 2 ? -13 : 15));
-        lb.setAttribute("opacity", op);
+        paintLabel(m, tp, op2);
       }
     }
+  }
+
+  function visOp(d, radius, m) {
+    if (!zooming && !showUnsure && d > radius * 1.02) return "0";
+    if (m.suspect || d > radius * 1.02) return "0.45";
+    return m.bg ? "0.6" : "1";
+  }
+
+  function paintLabel(m, tp, op) {
+    if (!m.labelEl) return;
+    m.labelEl.setAttribute("x", tp[0] + (m.pos < 2 ? 14 : -14));
+    m.labelEl.setAttribute("y", tp[1] + (m.pos % 2 ? -13 : 15));
+    m.labelEl.setAttribute("opacity", op);
+  }
+
+  // 30fps animation loop; pauses when the tab is hidden
+  function animLoop(now) {
+    animRAF = requestAnimationFrame(animLoop);
+    if (document.hidden) { lastFrameT = now; return; }
+    var dt = (now - lastFrameT) / 1000;
+    if (dt < 0.033) return;       // throttle to ~30fps
+    if (dt > 0.25) dt = 0.25;     // cap after a stall so nothing lurches
+    lastFrameT = now;
+    advanceTrains(dt);
+    paintTrains();
   }
 
   /* ---------- refresh loop ---------- */
   function refresh() {
     if (!curId) return;
     var forId = curId;
-    get("/api/positions", function (data) {
-      lastPositions = data.trains; // picked up by the next arrivals-driven render
-    }, function () { /* ambient layer is optional */ });
     get("/api/arrivals?mapid=" + forId, function (data) {
       lastArrivals = data.arrivals;
       lastArrivalsFor = forId;
       lastFetch = Date.now();
       if (forId !== curId) return; // stale response, user already moved on
       renderBoard(data.arrivals);
-      if (!zooming) renderMap(data.arrivals);
+      if (!zooming) renderMap(data.arrivals, true); // fresh data → update motion targets
     }, function (msg) {
       if (forId !== curId) return;
       showStatus(msg, true);
     });
   }
 
-  function startPolling() {
-    if (timer) clearInterval(timer);
-    refresh();
-    timer = setInterval(refresh, 10000);
+  function refreshPositions() {
+    get("/api/positions", function (data) {
+      lastPositions = data.trains; // grey ambient layer; picked up on next map render
+    }, function () { /* ambient layer is optional */ });
   }
 
-  setInterval(placeTrains, 500); // keep trains crawling between fetches
+  function startPolling() {
+    if (timer) clearInterval(timer);
+    if (posTimer) clearInterval(posTimer);
+    refresh();
+    refreshPositions();
+    timer = setInterval(refresh, 10000);         // arrivals: drives the board + colored trains
+    posTimer = setInterval(refreshPositions, 15000); // system-wide positions: lighter cadence
+  }
 
   function stationChanged() {
     store("cta_mapid", curId);
@@ -1094,13 +1169,13 @@
     if (hadMap) {
       playZoomOut(function () {
         zooming = false;
-        if (lastArrivalsFor === curId && lastArrivals) renderMap(lastArrivals);
+        if (lastArrivalsFor === curId && lastArrivals) renderMap(lastArrivals, true);
         // else: zoomPending stays set; the in-flight fetch renders on arrival
       });
     }
   }
 
-  window.onresize = function () { if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals); };
+  window.onresize = function () { if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals, false); };
 
   get("/api/stations?v=3", function (data) {
     stationList = data.stations;
@@ -1120,7 +1195,7 @@
 
   get("/api/lines", function (data) {
     trackRoutes = data.routes;
-    if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals);
+    if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals, false);
   }, function () { /* map still works without tracks */ });
 
   tickClock();

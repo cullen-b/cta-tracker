@@ -15,6 +15,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 ROOT = Path(__file__).parent
@@ -117,6 +118,7 @@ DEMO_ARRIVALS = [
 ]
 
 app = FastAPI(title="cta-tracker")
+app.add_middleware(GZipMiddleware, minimum_size=500)  # shrink JSON on slow links
 client = httpx.AsyncClient(timeout=10)
 _cache: dict[str, tuple[float, list]] = {}
 
