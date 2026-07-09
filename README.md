@@ -46,6 +46,28 @@ wrong clock on the server or iPad doesn't skew the numbers.
 
 ## Hosting
 
-Any tiny host works — one process, ~50 MB RAM, no database. E.g. Fly.io,
-Railway, or a Raspberry Pi on the LAN. Set `CTA_API_KEY` as a secret and run
-the uvicorn command above.
+Any tiny host works — one process, ~50 MB RAM, no database. It needs to run the
+Python server (GitHub Pages can't — it's static-only, and the CTA API blocks
+direct browser calls via CORS).
+
+### Deploy to Render (free, auto-deploys from GitHub)
+
+`render.yaml` in the repo is a Render Blueprint, so setup is mostly clicks:
+
+1. Push this repo to GitHub (already wired to `origin`):
+   ```
+   git add -A && git commit -m "Add Render deploy config" && git push
+   ```
+2. At [dashboard.render.com](https://dashboard.render.com) → **New → Blueprint**,
+   connect the repo. Render reads `render.yaml` and creates the web service.
+3. When prompted, paste your `CTA_API_KEY` (it's marked `sync: false`, so it
+   lives only in Render, never in git). Click **Apply**.
+4. First build takes ~2 min; you get a public `https://cta-tracker-xxx.onrender.com`
+   URL. Open it on the iPad, Add to Home Screen, done.
+
+Every `git push` afterward auto-redeploys. The free tier idles a service after
+15 min of no traffic (~50 s cold start next visit) — but the kiosk polls every
+10 s, so while it's on the wall it never sleeps.
+
+Other hosts (Fly.io, Railway, a Raspberry Pi on the LAN) work the same way: set
+`CTA_API_KEY` as a secret/env var and run the uvicorn command above.

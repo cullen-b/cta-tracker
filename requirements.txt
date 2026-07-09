@@ -1,0 +1,5 @@
+# Deploy pin for Render (pyproject.toml stays the source of truth for local uv).
+# Regenerate locally with:  uv pip compile pyproject.toml -o requirements.txt
+fastapi==0.139.0
+uvicorn[standard]==0.50.2
+httpx==0.28.1
