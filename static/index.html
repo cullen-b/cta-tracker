@@ -1192,8 +1192,10 @@
     stationList = data.stations;
     lineOrder = data.line_order;
     for (var i = 0; i < stationList.length; i++) stationById[stationList[i].map_id] = stationList[i];
+    var DEFAULT_STATION = "40380"; // Clark/Lake — first-load default before geolocation
     var saved = read("cta_mapid");
-    curId = (saved && stationById[saved]) ? saved : stationList[0].map_id;
+    curId = (saved && stationById[saved]) ? saved
+      : (stationById[DEFAULT_STATION] ? DEFAULT_STATION : stationList[0].map_id);
     updateStationBtn();
     renderFavs();
     showStatus("Loading…");
