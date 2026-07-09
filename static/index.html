@@ -1044,6 +1044,24 @@
     }
   }
 
+  // place one car/headlight at arc-length s: angle and side-offset both come
+  // from a chord across the element's own length, so it turns smoothly and the
+  // "ride beside the line" offset eases to the centerline through sharp bends
+  function placeBody(el, seg, s, dir, lane) {
+    if (!el) return;
+    var half = 4.6;
+    var pC = pointAtArc(seg, s);
+    var pA = pointAtArc(seg, s - half);
+    var pB = pointAtArc(seg, s + half);
+    var cxv = pB.x - pA.x, cyv = pB.y - pA.y;
+    var clen = Math.sqrt(cxv * cxv + cyv * cyv) || 1;
+    var ang = Math.atan2(cyv, cxv) * 180 / Math.PI;
+    var straight = clen / (2 * half); if (straight > 1) straight = 1; // 1 = straight, →0 at a hard bend
+    var off = lane * straight * dir;
+    el.setAttribute("transform", "translate("
+      + (pC.x - off * cyv / clen) + "," + (pC.y + off * cxv / clen) + ") rotate(" + ang + ")");
+  }
+
   // draw every train from its current smoothed state (DOM writes only)
   function paintTrains() {
     if (!animProject) return;
@@ -1064,17 +1082,13 @@
         var op = visOp(d, radius, m);
         g.setAttribute("opacity", op);
         if (op !== "0") {
+          // place one body along the rail: each element's angle + side-offset
+          // come from a chord across its own length, so it articulates through
+          // bends and the offset relaxes to the centerline on sharp curves
           for (var ci = 0; ci < n; ci++) {
-            var atc = pointAtArc(seg, arcPx + dir * (ci - (n - 1) / 2) * STEP);
-            var tl = Math.sqrt(atc.tx * atc.tx + atc.ty * atc.ty) || 1;
-            m.carEls[ci].setAttribute("transform", "translate("
-              + (atc.x - dir * atc.ty / tl * LANE) + "," + (atc.y + dir * atc.tx / tl * LANE)
-              + ") rotate(" + atc.ang + ")");
+            placeBody(m.carEls[ci], seg, arcPx + dir * (ci - (n - 1) / 2) * STEP, dir, LANE);
           }
-          var nose = pointAtArc(seg, arcPx + dir * ((n / 2) * STEP + 1));
-          var tn = Math.sqrt(nose.tx * nose.tx + nose.ty * nose.ty) || 1;
-          m.headEl.setAttribute("transform", "translate("
-            + (nose.x - dir * nose.ty / tn * LANE) + "," + (nose.y + dir * nose.tx / tn * LANE) + ")");
+          placeBody(m.headEl, seg, arcPx + dir * ((n / 2) * STEP + 1), dir, LANE);
         }
         paintLabel(m, tp, op);
       } else { // off-rail: straight consist at the dead-reckoned position
