@@ -320,6 +320,7 @@
   var walkMin = parseInt(read("cta_walk"), 10) || 0; // minutes to walk to the station
   var trainState = {}; // per-run motion state, keyed by run number; survives rebuilds
   var lastRadius = 0, lastRadiusFor = null; // sticky zoom level between refreshes
+  var mapSig = null;   // signature of the static scaffold currently in the DOM
 
   // motion tuning (speeds in km/s along the track; ~0.025 km/s ≈ 90 km/h)
   var V_MAX = 0.028, V_DEFAULT = 0.012, V_STOP = 0.0015;
@@ -732,8 +733,14 @@
       }
       return chains;
     }
-    trackPx = {};
-    if (trackRoutes) {
+    // Only rebuild the heavy static scaffold (tracks, stations, rings, marker)
+    // when the view actually changes. A plain data refresh keeps it in place and
+    // just swaps the light train layer — so the map never blinks.
+    var sig = curId + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "|" + (trackRoutes ? 1 : 0);
+    var rebuildStatic = zoomPending || sig !== mapSig || !document.getElementById("zoomG");
+
+    if (rebuildStatic && trackRoutes) {
+      trackPx = {};
       for (var tr0 in trackRoutes) {
         var out = [];
         var srcSegs = trackRoutes[tr0];
@@ -746,23 +753,6 @@
       }
     }
 
-    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">';
-
-    // distance rings (fixed; fade in after the zoom lands)
-    var ringsOp = zoomPending ? 0 : 1;
-    var rings = [radius / 2, radius];
-    svg += '<g id="rings" opacity="' + ringsOp + '">';
-    for (var r = 0; r < rings.length; r++) {
-      var km = rings[r];
-      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (km * scale)
-        + '" fill="none" stroke="#1e2430" stroke-width="1"/>'
-        + '<text x="' + (cx + 4) + '" y="' + (cy - km * scale + 14)
-        + '" fill="#4b5568" font-size="11">' + (Math.round(km * 0.621371 * 10) / 10) + ' mi</text>';
-    }
-    svg += "</g>";
-
-    svg += '<g id="zoomG">';
-
     function segmentPath(segPx) {
       var pts = "";
       for (var i = 0; i < segPx.pts.length; i++) {
@@ -770,70 +760,87 @@
       }
       return pts;
     }
-    if (trackRoutes) {
-      var route, segs, k;
-      // whole network in grey
-      for (route in trackPx) {
-        if (cur.lines.indexOf(route) !== -1) continue;
-        segs = trackPx[route].draw;
-        for (k = 0; k < segs.length; k++) {
-          svg += '<polyline points="' + segmentPath(segs[k]) + '" fill="none" stroke="#252d3b" stroke-width="2"/>';
-        }
+    function offsetPts(pts, off) {
+      var out = [];
+      for (var i = 0; i < pts.length; i++) {
+        var pA = pts[i > 0 ? i - 1 : i], pB = pts[i < pts.length - 1 ? i + 1 : i];
+        var dx = pB[0] - pA[0], dy = pB[1] - pA[1];
+        var len = Math.sqrt(dx * dx + dy * dy) || 1;
+        out.push([pts[i][0] - (dy / len) * off, pts[i][1] + (dx / len) * off]);
       }
-      // this station's lines in color; corridors shared by several of them get
-      // stacked ribbon strokes (widest first) so every color stays visible
-      var byGeom = {}, geomOrder = [];
-      for (var c = 0; c < cur.lines.length; c++) {
-        route = cur.lines[c];
-        segs = (trackPx[route] || {}).draw || [];
-        for (k = 0; k < segs.length; k++) {
-          var pts2 = segmentPath(segs[k]);
-          if (!byGeom[pts2]) { byGeom[pts2] = { routes: [], seg: segs[k] }; geomOrder.push(pts2); }
-          byGeom[pts2].routes.push(route);
-        }
+      return out;
+    }
+    function pathStr(pts) {
+      var s3 = "";
+      for (var i = 0; i < pts.length; i++) {
+        s3 += (i ? " " : "") + Math.round(pts[i][0] * 10) / 10 + "," + Math.round(pts[i][1] * 10) / 10;
       }
-      // shared corridors: parallel colored lines side by side, transit-map style.
-      // offset each route's copy perpendicular to the local track direction
-      function offsetPts(pts, off) {
-        var out = [];
-        for (var i = 0; i < pts.length; i++) {
-          var pA = pts[i > 0 ? i - 1 : i], pB = pts[i < pts.length - 1 ? i + 1 : i];
-          var dx = pB[0] - pA[0], dy = pB[1] - pA[1];
-          var len = Math.sqrt(dx * dx + dy * dy) || 1;
-          out.push([pts[i][0] - (dy / len) * off, pts[i][1] + (dx / len) * off]);
-        }
-        return out;
-      }
-      function pathStr(pts) {
-        var s3 = "";
-        for (var i = 0; i < pts.length; i++) {
-          s3 += (i ? " " : "") + Math.round(pts[i][0] * 10) / 10 + "," + Math.round(pts[i][1] * 10) / 10;
-        }
-        return s3;
-      }
-      var SPACING = 5;
-      for (var gi = 0; gi < geomOrder.length; gi++) {
-        var entry = byGeom[geomOrder[gi]];
-        var shared = entry.routes;
-        // consistent color order so lines flow continuously across segments
-        shared.sort(function (x, y) { return LINE_SEQ.indexOf(x) - LINE_SEQ.indexOf(y); });
-        for (var si = 0; si < shared.length; si++) {
-          var off = (si - (shared.length - 1) / 2) * SPACING;
-          var pl = off === 0 ? entry.seg.pts : offsetPts(entry.seg.pts, off);
-          svg += '<polyline points="' + pathStr(pl) + '" fill="none" stroke="' + (COLORS[shared[si]] || "#888")
-            + '" stroke-width="4.5" stroke-linecap="round" opacity="0.9"/>';
-        }
-      }
+      return s3;
     }
 
-    // stations, each with a small grey name
-    for (var s = 0; s < stationList.length; s++) {
-      var st = stationList[s];
-      if (st.map_id === cur.map_id) continue;
-      var p2 = px(st.lat, st.lon);
-      svg += '<circle cx="' + p2[0] + '" cy="' + p2[1] + '" r="2.5" fill="#4b5568"/>'
-        + '<text x="' + p2[0] + '" y="' + (p2[1] + 12) + '" fill="#565f6e" font-size="9.5" text-anchor="middle">'
-        + esc(st.name) + "</text>";
+    animProject = { px: px, radius: radius, cur: cur, scale: scale, cx: cx, cy: cy };
+
+    if (rebuildStatic) {
+      var ringsOp = zoomPending ? 0 : 1;
+      var rings = [radius / 2, radius];
+      var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">';
+      svg += '<g id="rings" opacity="' + ringsOp + '">';
+      for (var r = 0; r < rings.length; r++) {
+        var km = rings[r];
+        svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (km * scale)
+          + '" fill="none" stroke="#1e2430" stroke-width="1"/>'
+          + '<text x="' + (cx + 4) + '" y="' + (cy - km * scale + 14)
+          + '" fill="#4b5568" font-size="11">' + (Math.round(km * 0.621371 * 10) / 10) + ' mi</text>';
+      }
+      svg += "</g><g id='zoomG'>";
+      if (trackRoutes && trackPx) {
+        var route, segs, k;
+        for (route in trackPx) { // whole network in grey
+          if (cur.lines.indexOf(route) !== -1) continue;
+          segs = trackPx[route].draw;
+          for (k = 0; k < segs.length; k++) {
+            svg += '<polyline points="' + segmentPath(segs[k]) + '" fill="none" stroke="#252d3b" stroke-width="2"/>';
+          }
+        }
+        var byGeom = {}, geomOrder = [];
+        for (var c = 0; c < cur.lines.length; c++) {
+          route = cur.lines[c];
+          segs = (trackPx[route] || {}).draw || [];
+          for (k = 0; k < segs.length; k++) {
+            var pts2 = segmentPath(segs[k]);
+            if (!byGeom[pts2]) { byGeom[pts2] = { routes: [], seg: segs[k] }; geomOrder.push(pts2); }
+            byGeom[pts2].routes.push(route);
+          }
+        }
+        var SPACING = 5;
+        for (var gi = 0; gi < geomOrder.length; gi++) {
+          var entry = byGeom[geomOrder[gi]];
+          var shared = entry.routes;
+          shared.sort(function (x, y) { return LINE_SEQ.indexOf(x) - LINE_SEQ.indexOf(y); });
+          for (var si = 0; si < shared.length; si++) {
+            var off = (si - (shared.length - 1) / 2) * SPACING;
+            var pl = off === 0 ? entry.seg.pts : offsetPts(entry.seg.pts, off);
+            svg += '<polyline points="' + pathStr(pl) + '" fill="none" stroke="' + (COLORS[shared[si]] || "#888")
+              + '" stroke-width="4.5" stroke-linecap="round" opacity="0.9"/>';
+          }
+        }
+      }
+      for (var s = 0; s < stationList.length; s++) { // stations + grey names
+        var stn = stationList[s];
+        if (stn.map_id === cur.map_id) continue;
+        var p2 = px(stn.lat, stn.lon);
+        svg += '<circle cx="' + p2[0] + '" cy="' + p2[1] + '" r="2.5" fill="#4b5568"/>'
+          + '<text x="' + p2[0] + '" y="' + (p2[1] + 12) + '" fill="#565f6e" font-size="9.5" text-anchor="middle">'
+          + esc(stn.name) + "</text>";
+      }
+      svg += "<g id='trainLayer'></g></g>"; // trains fill this, tracks above stay put
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="#e8eaf0" stroke-width="1.5" opacity="0.45"/>'
+        + '<circle cx="' + cx + '" cy="' + cy + '" r="8" fill="#e8eaf0" stroke="#0b0e14" stroke-width="2"/>'
+        + '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="#0b0e14"/>'
+        + '<text x="' + cx + '" y="' + (cy + 30) + '" fill="#e8eaf0" font-size="15" font-weight="bold" text-anchor="middle">'
+        + esc(cur.name) + "</text></svg>";
+      mapEl.innerHTML = svg;
+      mapSig = sig;
     }
 
     // grey ambient layer: every other live train nearby (not bound for us)
@@ -849,12 +856,11 @@
       }
     }
 
-    // trains: bind each to a position along its track chain, then let the
-    // animation loop glide it. Snapping happens here (once per data update),
-    // never per frame.
+    // trains: bind each to a position along its chain, build the (small) train
+    // layer only — the static scaffold above is untouched on a data refresh.
     animTrains = [];
-    animProject = { px: px, radius: radius, cur: cur, scale: scale, cx: cx, cy: cy };
     var ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+    var tsvg = "";
     for (var t = 0; t < trains.length; t++) {
       var a2 = trains[t].a;
       var bg = !!trains[t].bg;
@@ -895,27 +901,18 @@
           + '" stroke="' + carStroke + '" stroke-width="1.2"/>';
       }
       body += '<circle id="trg' + t + 'h" r="2.4" fill="' + (bg ? "#78828f" : "#fff7cc") + '"/>';
-      svg += '<g id="trg' + t + '" opacity="0">' + body + "</g>";
+      tsvg += '<g id="trg' + t + '" opacity="0">' + body + "</g>";
       if (!bg) {
         var anchorAttr = t % 4 < 2 ? "" : ' text-anchor="end"';
         var label = a2.delayed ? "dly" : (a2.approaching || a2.min <= 1 ? "due" : a2.min + "m");
         if (trains[t].suspect) label += "?";
         if (a2.heading != null) label = ARROWS[Math.round(a2.heading / 45) % 8] + label;
-        svg += '<text id="trl' + t + '" x="0" y="0" fill="#e8eaf0" font-size="13"' + anchorAttr + ">" + label + "</text>";
+        tsvg += '<text id="trl' + t + '" x="0" y="0" fill="#e8eaf0" font-size="13"' + anchorAttr + ">" + label + "</text>";
       }
     }
+    var layer = document.getElementById("trainLayer");
+    if (layer) layer.innerHTML = tsvg;
 
-    svg += "</g>";
-
-    // current station — static bullseye, fixed at center
-    svg += '<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="#e8eaf0" stroke-width="1.5" opacity="0.45"/>'
-      + '<circle cx="' + cx + '" cy="' + cy + '" r="8" fill="#e8eaf0" stroke="#0b0e14" stroke-width="2"/>'
-      + '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="#0b0e14"/>'
-      + '<text x="' + cx + '" y="' + (cy + 30) + '" fill="#e8eaf0" font-size="15" font-weight="bold" text-anchor="middle">'
-      + esc(cur.name) + "</text>";
-
-    svg += "</svg>";
-    mapEl.innerHTML = svg;
     // cache element refs so the animation loop never touches getElementById
     for (var tc = 0; tc < animTrains.length; tc++) {
       var m = animTrains[tc];
