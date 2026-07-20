@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 ROOT = Path(__file__).parent
 CTA_URL = "https://lapi.transitchicago.com/api/1.0/ttarrivals.aspx"
@@ -96,17 +96,18 @@ def _build_line_order() -> dict[str, list]:
 LINE_ORDER = _build_line_order()
 
 
-def _load_key() -> str:
-    key = os.environ.get("CTA_API_KEY", "")
+def _load_key(name: str = "CTA_API_KEY") -> str:
+    key = os.environ.get(name, "")
     env_file = ROOT / ".env"
     if not key and env_file.exists():
         for line in env_file.read_text().splitlines():
-            if line.startswith("CTA_API_KEY="):
+            if line.startswith(name + "="):
                 key = line.split("=", 1)[1].strip().strip('"')
     return key
 
 
 API_KEY = _load_key()
+BUS_KEY = _load_key("CTA_BUS_KEY")
 DEMO = os.environ.get("CTA_DEMO") == "1"  # fake arrivals while waiting on an API key
 
 DEMO_ARRIVALS = [
@@ -290,3 +291,142 @@ async def positions():
     _pos_cache[0] = now
     _pos_cache[1] = result
     return {"trains": result, "cached": False}
+
+
+# =====================================================================
+# Bus mode — CTA Bus Tracker (BusTime) API, a completely separate system
+# =====================================================================
+CTA_BUS_URL = "https://www.ctabustracker.com/bustime/api/v2"
+BUS_TTL_STATIC = 3600   # routes/directions/stops/patterns rarely change
+BUS_TTL_LIVE = 12       # predictions/vehicles
+_bus_cache: dict[str, tuple[float, object]] = {}
+
+# bundled index of every bus stop (id, name, lat, lon, primary route+dir), so the
+# client can find the nearest stop by geolocation — BusTime has no all-stops query
+_bus_stops_file = ROOT / "bus_stops.json"
+BUS_STOPS_JSON = _bus_stops_file.read_text() if _bus_stops_file.exists() else '{"stops":[]}'
+
+
+@app.get("/api/bus/allstops")
+async def bus_allstops():
+    return Response(BUS_STOPS_JSON, media_type="application/json",
+                    headers={"Cache-Control": "max-age=86400"})
+
+
+async def _bus_get(path: str, params: dict, ttl: float, container: str):
+    """Cached GET against BusTime; returns the inner container list."""
+    if not BUS_KEY:
+        raise HTTPException(503, "CTA_BUS_KEY not set — apply at ctabustracker.com")
+    ck = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    now = time.monotonic()
+    hit = _bus_cache.get(ck)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    try:
+        resp = await client.get(
+            f"{CTA_BUS_URL}/{path}",
+            params={"key": BUS_KEY, "format": "json", **params},
+        )
+        resp.raise_for_status()
+        body = resp.json().get("bustime-response", {})
+        if "error" in body and container not in body:
+            msg = body["error"][0].get("msg", "bus API error") if body["error"] else "bus API error"
+            raise HTTPException(502, msg)
+        data = body.get(container, [])
+    except httpx.HTTPError as exc:
+        if hit:
+            return hit[1]
+        raise HTTPException(502, f"Bus API unreachable: {exc}") from exc
+    _bus_cache[ck] = (now, data)
+    return data
+
+
+def _bus_min(prdctdn: str) -> int:
+    try:
+        return max(0, int(prdctdn))
+    except (TypeError, ValueError):
+        return 0  # "DUE"
+
+
+def _bus_time(prdtm: str) -> str:
+    try:
+        return datetime.strptime(prdtm, "%Y%m%d %H:%M").strftime("%I:%M").lstrip("0")
+    except (TypeError, ValueError):
+        return ""
+
+
+@app.get("/api/bus/routes")
+async def bus_routes():
+    rows = await _bus_get("getroutes", {}, BUS_TTL_STATIC, "routes")
+    routes = [{"rt": r["rt"], "name": r.get("rtnm", ""), "color": r.get("rtclr", "#888")} for r in rows]
+    return JSONResponse({"routes": routes}, headers={"Cache-Control": "max-age=3600"})
+
+
+@app.get("/api/bus/directions")
+async def bus_directions(rt: str = Query(pattern=r"^[A-Za-z0-9]{1,6}$")):
+    rows = await _bus_get("getdirections", {"rt": rt}, BUS_TTL_STATIC, "directions")
+    return JSONResponse({"directions": [d["dir"] for d in rows]}, headers={"Cache-Control": "max-age=3600"})
+
+
+@app.get("/api/bus/stops")
+async def bus_stops(rt: str = Query(pattern=r"^[A-Za-z0-9]{1,6}$"), dir: str = Query(max_length=20)):
+    rows = await _bus_get("getstops", {"rt": rt, "dir": dir}, BUS_TTL_STATIC, "stops")
+    stops = [{"stpid": str(s["stpid"]), "name": s.get("stpnm", ""),
+              "lat": s.get("lat"), "lon": s.get("lon")} for s in rows]
+    return JSONResponse({"stops": stops}, headers={"Cache-Control": "max-age=3600"})
+
+
+@app.get("/api/bus/patterns")
+async def bus_patterns(rt: str = Query(pattern=r"^[A-Za-z0-9]{1,6}$")):
+    rows = await _bus_get("getpatterns", {"rt": rt}, BUS_TTL_STATIC, "ptr")
+    out = []
+    for p in rows:
+        pts = [[pt["lat"], pt["lon"], pt.get("pdist", 0)] for pt in p.get("pt", [])]
+        out.append({"pid": p["pid"], "dir": p.get("rtdir", ""), "length": p.get("ln", 0), "pts": pts})
+    return JSONResponse({"patterns": out}, headers={"Cache-Control": "max-age=3600"})
+
+
+@app.get("/api/bus/predictions")
+async def bus_predictions(stpid: str = Query(pattern=r"^\d{1,7}$")):
+    rows = await _bus_get("getpredictions", {"stpid": stpid}, BUS_TTL_LIVE, "prd")
+    if isinstance(rows, dict):
+        rows = [rows]
+    preds = []
+    for p in rows:
+        preds.append({
+            "route": p.get("rt", ""),
+            "dest": p.get("des", ""),
+            "dir": p.get("rtdir", ""),
+            "min": _bus_min(p.get("prdctdn")),
+            "time": _bus_time(p.get("prdtm")),
+            "approaching": str(p.get("prdctdn")).upper() == "DUE",
+            "delayed": bool(p.get("dly")),
+            "vid": p.get("vid", ""),
+        })
+    preds.sort(key=lambda a: a["min"])
+    return {"predictions": preds}
+
+
+@app.get("/api/bus/vehicles")
+async def bus_vehicles(rt: str = Query(pattern=r"^[A-Za-z0-9,]{1,60}$")):
+    rows = await _bus_get("getvehicles", {"rt": rt}, BUS_TTL_LIVE, "vehicle")
+    if isinstance(rows, dict):
+        rows = [rows]
+    buses = []
+    for v in rows:
+        try:
+            lat, lon = float(v["lat"]), float(v["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        buses.append({
+            "vid": str(v.get("vid", "")),
+            "route": v.get("rt", ""),
+            "dest": v.get("des", ""),
+            "lat": lat,
+            "lon": lon,
+            "heading": int(v["hdg"]) if str(v.get("hdg", "")).isdigit() else None,
+            "pid": v.get("pid"),
+            "pdist": float(v["pdist"]) if v.get("pdist") not in (None, "") else None,
+            "delayed": bool(v.get("dly")),
+        })
+    return {"buses": buses}

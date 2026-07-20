@@ -1,17 +1,27 @@
 # cta-tracker
 
-Kiosk-style arrival board for CTA "L" trains. Pick a station, see the next
-trains with live countdowns. Built to run cheap on a small host and display
-on an old iPad taped to the wall.
+Kiosk-style live map + arrival board for CTA "L" trains **and buses**. Pick a
+station (or a bus route + stop), see the next arrivals with live countdowns, and
+watch the vehicles glide along the map in real time. Built to run cheap on a
+small host and display on an old iPad taped to the wall.
+
+Toggle 🚆 / 🚌 in the header switches between train and bus mode; the choice is
+remembered.
 
 ## Setup
 
-1. Get a free CTA Train Tracker API key: https://www.transitchicago.com/developers/traintrackerapply/
-2. Put it in the environment (or a `.env` file in the project root):
+1. Get a free CTA **Train Tracker** key: https://www.transitchicago.com/developers/traintrackerapply/
+   and a free CTA **Bus Tracker** key: https://www.transitchicago.com/developers/bustracker/
+   (bus mode is optional — trains work without a bus key).
+2. Put them in the environment (or a `.env` file in the project root):
 
    ```
-   CTA_API_KEY=your_key_here
+   CTA_API_KEY=your_train_key_here
+   CTA_BUS_KEY=your_bus_key_here
    ```
+
+   On Render, add both as environment variables in the dashboard (Settings →
+   Environment) — `render.yaml` marks them `sync: false` so they stay out of git.
 
 3. Install and run with [uv](https://docs.astral.sh/uv/):
 
