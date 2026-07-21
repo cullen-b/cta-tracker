@@ -1272,7 +1272,7 @@
 
   var busRoutesCache = null, busColors = {};
   var busStep = "route", busPickRt = null, busPickRtName = null, busPlaces = null;
-  var busPreds = [], busVehicles = [], busPatterns = null, busPatternsFor = null;
+  var busPreds = [], busVehicles = [], busPatternsByRt = {}; // patterns cached per route
   var busTimer = null, busPosTimer = null;
 
   function paintModeBtn() {
@@ -1496,17 +1496,31 @@
     startBusPolling();
     if (hadMap) playZoomOut(function () { zooming = false; if (busStop) renderBusMap(true); });
   }
-  function ensureBusPatterns(cb) {
-    if (!busStop) { cb && cb(); return; }
-    if (busPatternsFor === busStop.rt && busPatterns) { cb && cb(); return; }
-    busPatterns = null;
-    get("/api/bus/patterns?rt=" + encodeURIComponent(busStop.rt), function (d) {
-      busPatterns = d.patterns; busPatternsFor = busStop.rt; cb && cb();
-    }, function () { cb && cb(); });
+  // routes to show = every route with a prediction at the stop (what's on the
+  // board), plus the picked route, capped at 10 (the vehicles API limit)
+  function busRouteSet() {
+    var seen = {}, out = [];
+    if (busStop && busStop.rt) { seen[busStop.rt] = 1; out.push(busStop.rt); }
+    for (var i = 0; i < busPreds.length && out.length < 10; i++) {
+      var r = busPreds[i].route;
+      if (r && !seen[r]) { seen[r] = 1; out.push(r); }
+    }
+    return out;
+  }
+  function ensureBusPatterns(routes, cb) {
+    var need = [];
+    for (var i = 0; i < routes.length; i++) if (!busPatternsByRt[routes[i]]) need.push(routes[i]);
+    if (!need.length) { cb && cb(); return; }
+    var pending = need.length;
+    for (var j = 0; j < need.length; j++) (function (rt) {
+      get("/api/bus/patterns?rt=" + encodeURIComponent(rt), function (d) {
+        busPatternsByRt[rt] = d.patterns; if (--pending === 0) cb && cb();
+      }, function () { busPatternsByRt[rt] = []; if (--pending === 0) cb && cb(); });
+    })(need[j]);
   }
   function startBusPolling() {
     stopAllTimers();
-    ensureBusPatterns(function () { refreshBusPreds(); refreshBusVehicles(); });
+    refreshBusPreds();
     busTimer = setInterval(refreshBusPreds, 15000);
     busPosTimer = setInterval(refreshBusVehicles, 12000);
   }
@@ -1517,12 +1531,15 @@
       if (mode !== "bus" || !busStop || busStop.id !== forId) return;
       busPreds = d.predictions;
       renderBusBoard(d.predictions);
+      ensureBusPatterns(busRouteSet(), function () { refreshBusVehicles(); }); // draw all board routes
     }, function (m) { if (mode === "bus") showStatus(m, true); });
   }
   function refreshBusVehicles() {
-    if (!busStop) return; var rt = busStop.rt;
-    get("/api/bus/vehicles?rt=" + encodeURIComponent(rt), function (d) {
-      if (mode !== "bus" || !busStop || busStop.rt !== rt) return;
+    if (!busStop) return;
+    var routes = busRouteSet(); if (!routes.length) return;
+    var forId = busStop.id;
+    get("/api/bus/vehicles?rt=" + encodeURIComponent(routes.join(",")), function (d) {
+      if (mode !== "bus" || !busStop || busStop.id !== forId) return;
       busVehicles = d.buses; lastFetch = Date.now();
       if (!zooming) renderBusMap(true);
     }, function () { /* map optional */ });
@@ -1605,27 +1622,34 @@
       return { pts: pts, cum: cum, total: cum[cum.length - 1] };
     }
 
-    var sig = "bus:" + cur.id + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "|" + (busPatterns ? busPatterns.length : 0);
+    // every route on the board gets its line + buses; draw only the ones whose
+    // pattern geometry has loaded (buses still show for the rest, off-track)
+    var mapRoutes = busRouteSet(), drawRoutes = [];
+    for (var mr = 0; mr < mapRoutes.length; mr++) {
+      var prt = busPatternsByRt[mapRoutes[mr]];
+      if (prt && prt.length) drawRoutes.push(mapRoutes[mr]);
+    }
+
+    var sig = "bus:" + cur.id + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "|" + drawRoutes.join(",");
     var rebuildStatic = zoomPending || sig !== mapSig || !document.getElementById("zoomG");
 
     if (rebuildStatic) {
       trackPx = {};
-      if (busPatterns) {
-        var chains = [];
-        for (var p = 0; p < busPatterns.length; p++) {
-          var pts = [], arr = busPatterns[p].pts;
+      for (var dr = 0; dr < drawRoutes.length; dr++) {
+        var chains = [], pats = busPatternsByRt[drawRoutes[dr]];
+        for (var p = 0; p < pats.length; p++) {
+          var pts = [], arr = pats[p].pts;
           for (var pp = 0; pp < arr.length; pp++) pts.push(px(arr[pp][0], arr[pp][1]));
           if (pts.length > 1) chains.push(withCum(pts));
         }
-        trackPx[cur.rt] = { draw: chains, walk: chains };
+        trackPx[drawRoutes[dr]] = { draw: chains, walk: chains };
       }
     }
 
-    animProject = { px: px, radius: radius, cur: { lat: cur.lat, lon: cur.lon, name: cur.name, lines: [cur.rt] },
+    animProject = { px: px, radius: radius, cur: { lat: cur.lat, lon: cur.lon, name: cur.name, lines: drawRoutes },
       scale: scale, cx: cx, cy: cy };
 
     if (rebuildStatic) {
-      var col = cur.color || BUS_FALLBACK;
       var ringsOp = zoomPending ? 0 : 1, rings = [radius / 2, radius];
       var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">';
       svg += '<g id="rings" opacity="' + ringsOp + '">';
@@ -1636,12 +1660,12 @@
           + (cy - km * scale + 14) + '" fill="#4b5568" font-size="11">' + (Math.round(km * 0.621371 * 10) / 10) + " mi</text>";
       }
       svg += "</g><g id='zoomG'>";
-      if (trackPx[cur.rt]) {
-        var cs = trackPx[cur.rt].draw;
+      for (var dc = 0; dc < drawRoutes.length; dc++) {
+        var dcol = busColors[drawRoutes[dc]] || BUS_FALLBACK, cs = trackPx[drawRoutes[dc]].draw;
         for (var c = 0; c < cs.length; c++) {
           var ptsStr = "";
           for (var q = 0; q < cs[c].pts.length; q++) ptsStr += (q ? " " : "") + Math.round(cs[c].pts[q][0]) + "," + Math.round(cs[c].pts[q][1]);
-          svg += '<polyline points="' + ptsStr + '" fill="none" stroke="' + col + '" stroke-width="4.5" stroke-linecap="round" opacity="0.85"/>';
+          svg += '<polyline points="' + ptsStr + '" fill="none" stroke="' + dcol + '" stroke-width="4" stroke-linecap="round" opacity="0.8"/>';
         }
       }
       svg += "<g id='trainLayer'></g></g>";
@@ -1660,7 +1684,7 @@
       var b = vlist[t].v, idx = vi++;
       var run = "b" + b.vid;
       var sinH = Math.sin((b.heading || 0) * Math.PI / 180), cosH = Math.cos((b.heading || 0) * Math.PI / 180);
-      var snap = b.heading == null ? null : snapToTrack(cur.rt, px(b.lat, b.lon));
+      var snap = b.heading == null ? null : snapToTrack(b.route, px(b.lat, b.lon));
       var onTrack = !!(snap && snap.d2 < 2500);
       var col = busColors[b.route] || BUS_FALLBACK;
       var meta = { run: run, bg: false, suspect: false, nCars: 1, pos: idx % 4, onTrack: onTrack,
