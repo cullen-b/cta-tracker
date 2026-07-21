@@ -387,7 +387,7 @@ async def bus_patterns(rt: str = Query(pattern=r"^[A-Za-z0-9]{1,6}$")):
 
 
 @app.get("/api/bus/predictions")
-async def bus_predictions(stpid: str = Query(pattern=r"^\d{1,7}$")):
+async def bus_predictions(stpid: str = Query(pattern=r"^\d{1,7}(,\d{1,7})*$")):
     rows = await _bus_get("getpredictions", {"stpid": stpid}, BUS_TTL_LIVE, "prd")
     if isinstance(rows, dict):
         rows = [rows]
