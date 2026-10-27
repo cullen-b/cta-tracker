@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <title>CTA Arrivals</title>
@@ -19,12 +19,24 @@
 
   /* full-screen map behind everything */
   #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 0; }
-  #map canvas { display: block; }
+  #map canvas { display: block; touch-action: none; cursor: grab; }
+  html { touch-action: manipulation; }
+  #recenter {
+    position: absolute; right: 16px; bottom: 16px; z-index: 4;
+    background: rgba(22, 27, 38, 0.92); color: #e8eaf0;
+    border: 1px solid #2a3242; border-radius: 999px;
+    font-size: 15px; padding: 10px 16px; cursor: pointer;
+    display: none;
+  }
+  #recenter.show { display: block; }
 
   header {
     position: absolute; top: 0; left: 0; right: 0;
     z-index: 3;
     padding: 12px 16px 6px;
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
     display: -webkit-flex; display: flex;
     -webkit-align-items: center; align-items: center;
   }
@@ -254,15 +266,32 @@
   #bus-crumb { padding: 2px 20px 12px; color: #9aa3b5; font-size: 15px; }
   #bus-crumb b { color: #e8eaf0; }
   @media (max-width: 700px) {
-    .col { width: 47%; max-width: 47%; max-height: 42%; padding: 0 10px 4px; }
+    /* phones: arrivals become a bottom sheet; mapFrame() centers the station above it */
+    #board {
+      top: auto; left: 0; right: 0; bottom: 0;
+      display: block; max-height: 42%;
+      overflow-y: auto; -webkit-overflow-scrolling: touch;
+      padding: 0 10px 10px; padding-bottom: max(10px, env(safe-area-inset-bottom));
+      pointer-events: auto;
+    }
+    .col { width: auto; max-width: none; max-height: none; overflow: visible; margin-top: 8px; padding: 0 12px 4px; }
+    #recenter { bottom: auto; top: 58%; margin-top: -48px; right: 12px; }
+    header { padding-left: max(10px, env(safe-area-inset-left)); padding-right: max(10px, env(safe-area-inset-right)); }
+    #station-btn { -webkit-flex: 1; flex: 1; min-width: 0; max-width: none; }
+    .hbtn { margin-left: 6px; }
+    #favs { top: 56px; left: 10px; right: 10px; }
     .badge { width: 38px; height: 30px; font-size: 9px; margin-right: 8px; border-radius: 7px; }
     .dest { font-size: 14px; }
     .eta { min-width: 52px; }
     .eta .min { font-size: 18px; }
     .eta .at { font-size: 10px; }
     #station-btn { font-size: 15px; padding: 7px 10px; }
-    #clock { font-size: 18px; }
+    #clock { font-size: 18px; margin-left: 8px; }
     .hbtn { font-size: 17px; padding: 5px 9px; }
+  }
+  @media (max-width: 480px) {
+    #clock { display: none; } /* phones already show the time */
+    .hbtn { padding: 5px 7px; }
   }
 </style>
 </head>
@@ -279,6 +308,7 @@
 </header>
 <div id="favs"></div>
 <div id="board"></div>
+<button id="recenter" title="Back to station">&#9678; Recenter</button>
 <div id="status-box"></div>
 <div id="walk-pop">
   <div class="wp-title">Walk time to station</div>
@@ -692,12 +722,20 @@
     cv.style.width = w + "px"; cv.style.height = h + "px";
   }
 
+  // where the station sits and how much room the auto-zoom gets; on phones the
+  // board is a bottom sheet, so center the map in the space above it
+  function mapFrame(w, h) {
+    if (w > 700) return { cx: w / 2, cy: h / 2, half: Math.min(w, h) / 2 - 24 };
+    var top = favBar.offsetHeight ? 104 : 60, bottom = h * 0.58;
+    return { cx: w / 2, cy: (top + bottom) / 2, half: Math.min(w / 2, (bottom - top) / 2) - 14 };
+  }
+
   function renderMap(arrivals, fresh) {
     var cur = stationById[curId];
     if (!cur) { clearMap(); return; }
     var w = mapEl.clientWidth, h = mapEl.clientHeight;
     if (!w || !h) return;
-    var cx = w / 2, cy = h / 2;
+    var fr = mapFrame(w, h), cx = fr.cx, cy = fr.cy;
 
     var trains = [];
     var nearestByDir = {};
@@ -721,14 +759,12 @@
     // sticky zoom: ignore small radius wobbles between refreshes so the whole
     // map doesn't rescale every 10s — but never stick to a level that would
     // push the nearest incoming trains off screen
-    if (!zoomPending && lastRadiusFor === curId && lastRadius
-        && lastRadius >= need * 1.1
-        && Math.abs(radius - lastRadius) / lastRadius < 0.25) {
+    if (!zoomPending && lastRadiusFor === curId && lastRadius && (userMoved()
+        || (lastRadius >= need * 1.1 && Math.abs(radius - lastRadius) / lastRadius < 0.25))) {
       radius = lastRadius;
     }
     lastRadius = radius; lastRadiusFor = curId;
-    var half = Math.min(cx, cy) - 24;
-    var scale = half / radius;
+    var scale = fr.half / radius;
 
     function px(lat, lon) {
       var dx = (lon - cur.lon) * 111.32 * Math.cos(cur.lat * Math.PI / 180);
@@ -798,7 +834,7 @@
     // changes. A plain data refresh just rebinds the trains — the cached
     // bitmap stays, so the map never blinks.
     var newDpr = window.devicePixelRatio || 1;
-    var sig = curId + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "@" + newDpr + "|" + (trackRoutes ? 1 : 0);
+    var sig = curId + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "c" + Math.round(cy) + "@" + newDpr + "|" + (trackRoutes ? 1 : 0);
     var rebuildStatic = zoomPending || sig !== mapSig || !staticItems;
 
     if (rebuildStatic && trackRoutes) {
@@ -822,17 +858,6 @@
       }
       return key;
     }
-    function offsetPts(pts, off) {
-      var out = [];
-      for (var i = 0; i < pts.length; i++) {
-        var pA = pts[i > 0 ? i - 1 : i], pB = pts[i < pts.length - 1 ? i + 1 : i];
-        var dx = pB[0] - pA[0], dy = pB[1] - pA[1];
-        var len = Math.sqrt(dx * dx + dy * dy) || 1;
-        out.push([pts[i][0] - (dy / len) * off, pts[i][1] + (dx / len) * off]);
-      }
-      return out;
-    }
-
     animProject = { px: px, radius: radius, cur: cur, scale: scale, cx: cx, cy: cy };
 
     if (rebuildStatic) {
@@ -862,8 +887,7 @@
           shared.sort(function (x, y) { return LINE_SEQ.indexOf(x) - LINE_SEQ.indexOf(y); });
           for (var si = 0; si < shared.length; si++) {
             var off = (si - (shared.length - 1) / 2) * SPACING;
-            items.stripes.push({ pts: off === 0 ? entry.seg.pts : offsetPts(entry.seg.pts, off),
-              color: COLORS[shared[si]] || "#888" });
+            items.stripes.push({ pts: entry.seg.pts, off: off, color: COLORS[shared[si]] || "#888" });
           }
         }
       }
@@ -878,7 +902,7 @@
       staticItems = items;
       ringsOn = !zoomPending;
       staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawScene(staticCtx);
+      drawScene(staticCtx, IDENTITY_XF);
       mapSig = sig;
     }
 
@@ -890,7 +914,7 @@
         var bt = lastPositions[bp];
         if (activeRuns[bt.run]) continue;
         var bd = kmBetween(cur.lat, cur.lon, bt.lat, bt.lon);
-        if (bd > radius * 1.6) continue; // skip trains far outside the view
+        if (bd > radius * 1.6 && !userMoved()) continue; // skip trains far outside the view
         trains.push({ a: bt, d: bd, suspect: false, bg: true });
       }
     }
@@ -1055,8 +1079,7 @@
   // pose of one car/headlight at arc-length s: angle and side-offset both come
   // from a chord across the element's own length, so it turns smoothly and the
   // "ride beside the line" offset eases to the centerline through sharp bends
-  function bodyAt(seg, s, dir, lane) {
-    var half = 4.6;
+  function bodyAt(seg, s, dir, lane, half) {
     var pC = pointAtArc(seg, s);
     var pA = pointAtArc(seg, s - half);
     var pB = pointAtArc(seg, s + half);
@@ -1069,71 +1092,100 @@
     return { x: pC.x - off * sin, y: pC.y + off * cos, cos: cos, sin: sin };
   }
 
-  function strokePoly(c, pts) {
+  function offsetPts(pts, off) {
+    var out = [];
+    for (var i = 0; i < pts.length; i++) {
+      var pA = pts[i > 0 ? i - 1 : i], pB = pts[i < pts.length - 1 ? i + 1 : i];
+      var dx = pB[0] - pA[0], dy = pB[1] - pA[1];
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      out.push([pts[i][0] - (dy / len) * off, pts[i][1] + (dx / len) * off]);
+    }
+    return out;
+  }
+
+  /* camera: scene px P lands on screen at P * K + (ox, oy). K = fly-in zoom x the
+     user's pinch zoom. sz scales drawn sizes: shrink when zoomed out (no clutter),
+     but stay fixed when zoomed in, like a normal map. */
+  var userK = 1, userTx = 0, userTy = 0;
+  var IDENTITY_XF = { K: 1, ox: 0, oy: 0, sz: 1 };
+  function userMoved() { return userK !== 1 || userTx !== 0 || userTy !== 0; }
+  function frameXf(p) {
+    var K = zoomK * userK;
+    return { K: K, ox: p.cx * (1 - K) + userTx, oy: p.cy * (1 - K) + userTy, sz: K < 1 ? K : 1 };
+  }
+
+  function strokeScreen(c, pts, xf, off) {
+    var sp = [];
+    for (var i = 0; i < pts.length; i++) sp.push([pts[i][0] * xf.K + xf.ox, pts[i][1] * xf.K + xf.oy]);
+    if (off) sp = offsetPts(sp, off);
     c.beginPath();
-    c.moveTo(pts[0][0], pts[0][1]);
-    for (var i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
+    c.moveTo(sp[0][0], sp[0][1]);
+    for (var j = 1; j < sp.length; j++) c.lineTo(sp[j][0], sp[j][1]);
     c.stroke();
   }
 
-  // tracks + stations in px space; cached into staticCv, or drawn live while zooming
-  function drawScene(c) {
+  // tracks + stations; cached into staticCv at the identity view, drawn live otherwise
+  function drawScene(c, xf) {
     var it = staticItems;
     if (!it) return;
-    var i;
+    var K = xf.K, ox = xf.ox, oy = xf.oy, sz = xf.sz, i;
     c.lineCap = "butt";
-    c.strokeStyle = "#252d3b"; c.lineWidth = 2;
+    c.strokeStyle = "#252d3b"; c.lineWidth = 2 * sz;
     c.beginPath(); // whole grey network in one path
     for (i = 0; i < it.grey.length; i++) {
       var g = it.grey[i];
-      c.moveTo(g[0][0], g[0][1]);
-      for (var j = 1; j < g.length; j++) c.lineTo(g[j][0], g[j][1]);
+      c.moveTo(g[0][0] * K + ox, g[0][1] * K + oy);
+      for (var j = 1; j < g.length; j++) c.lineTo(g[j][0] * K + ox, g[j][1] * K + oy);
     }
     c.stroke();
-    c.lineCap = "round"; c.lineWidth = it.stripeW; c.globalAlpha = it.stripeA;
+    c.lineCap = "round"; c.lineWidth = it.stripeW * sz; c.globalAlpha = it.stripeA;
     for (i = 0; i < it.stripes.length; i++) {
       c.strokeStyle = it.stripes[i].color;
-      strokePoly(c, it.stripes[i].pts);
+      strokeScreen(c, it.stripes[i].pts, xf, it.stripes[i].off * sz); // offset in screen px keeps stripes touching
     }
     c.globalAlpha = 1;
     c.fillStyle = "#4b5568";
     c.beginPath();
     for (i = 0; i < it.stations.length; i++) {
-      var s = it.stations[i];
-      c.moveTo(s.x + 2.5, s.y);
-      c.arc(s.x, s.y, 2.5, 0, Math.PI * 2);
+      var s = it.stations[i], sx = s.x * K + ox, sy = s.y * K + oy;
+      c.moveTo(sx + 2.5 * sz, sy);
+      c.arc(sx, sy, 2.5 * sz, 0, Math.PI * 2);
     }
     c.fill();
-    c.fillStyle = "#565f6e"; c.font = "9.5px " + FONT;
+    if (9.5 * sz < 5) return; // labels too small to read mid-fly-in
+    c.fillStyle = "#565f6e"; c.font = (9.5 * sz) + "px " + FONT;
     c.textAlign = "center"; c.textBaseline = "alphabetic";
     for (i = 0; i < it.stations.length; i++) {
-      c.fillText(it.stations[i].name, it.stations[i].x, it.stations[i].y + 12);
+      var st = it.stations[i];
+      c.fillText(st.name, st.x * K + ox, st.y * K + oy + 12 * sz);
     }
   }
 
-  function drawRings(c, p) {
+  function drawRings(c, p, xf) {
     var rings = [p.radius / 2, p.radius];
+    var ccx = p.cx + userTx, ccy = p.cy + userTy;
     c.strokeStyle = "#1e2430"; c.lineWidth = 1;
     c.fillStyle = "#4b5568"; c.font = "11px " + FONT;
     c.textAlign = "left"; c.textBaseline = "alphabetic";
     for (var r = 0; r < rings.length; r++) {
-      var rr = rings[r] * p.scale;
-      c.beginPath(); c.arc(p.cx, p.cy, rr, 0, Math.PI * 2); c.stroke();
-      c.fillText((Math.round(rings[r] * 0.621371 * 10) / 10) + " mi", p.cx + 4, p.cy - rr + 14);
+      var rr = rings[r] * p.scale * xf.K;
+      c.beginPath(); c.arc(ccx, ccy, rr, 0, Math.PI * 2); c.stroke();
+      c.fillText((Math.round(rings[r] * 0.621371 * 10) / 10) + " mi", ccx + 4, ccy - rr + 14);
     }
   }
 
   function drawMarker(c, p) {
-    c.beginPath(); c.arc(p.cx, p.cy, 14, 0, Math.PI * 2);
+    var mx = p.cx + userTx, my = p.cy + userTy;
+    c.beginPath(); c.arc(mx, my, 14, 0, Math.PI * 2);
     c.globalAlpha = 0.45; c.strokeStyle = "#e8eaf0"; c.lineWidth = 1.5; c.stroke();
     c.globalAlpha = 1;
-    c.beginPath(); c.arc(p.cx, p.cy, 8, 0, Math.PI * 2);
+    c.beginPath(); c.arc(mx, my, 8, 0, Math.PI * 2);
     c.fillStyle = "#e8eaf0"; c.fill();
     c.strokeStyle = "#0b0e14"; c.lineWidth = 2; c.stroke();
-    c.beginPath(); c.arc(p.cx, p.cy, 3, 0, Math.PI * 2);
+    c.beginPath(); c.arc(mx, my, 3, 0, Math.PI * 2);
     c.fillStyle = "#0b0e14"; c.fill();
     c.fillStyle = "#e8eaf0"; c.font = staticItems.nameFont + FONT; c.textAlign = "center";
-    c.fillText(p.cur.name, p.cx, p.cy + 30);
+    c.fillText(p.cur.name, mx, my + 30);
   }
 
   // car body: rounded rect centered on the origin
@@ -1148,18 +1200,20 @@
     c.closePath();
   }
 
-  // A/e/f: the frame's uniform scale + translation, so each car is one setTransform
-  function drawCar(c, A, e, f, x, y, cos, sin, m) {
-    c.setTransform(A * cos, A * sin, -A * sin, A * cos, A * x + e, A * y + f);
+  // one setTransform per car: rotation + drawn size, placed at screen (x, y)
+  function drawCar(c, A, x, y, cos, sin, m) {
+    c.setTransform(A * cos, A * sin, -A * sin, A * cos, dpr * x, dpr * y);
     carPath(c, m);
     c.fill(); c.stroke();
   }
 
-  function drawTrains(c, A, e, f) {
+  function drawTrains(c, xf) {
     var px = animProject.px, radius = animProject.radius, cur = animProject.cur;
     var scale = animProject.scale, ccx = animProject.cx, ccy = animProject.cy;
-    var STEP = 11, LANE = 8;
+    var K = xf.K, ox = xf.ox, oy = xf.oy, sz = xf.sz, A = dpr * sz;
+    var STEP = 11 * sz / K, LANE = 8 * sz / K, HALF = 4.6 * sz / K; // scene px, so cars keep their screen size
     c.lineWidth = 1.2;
+    c.font = (13 * sz) + "px " + FONT;
     for (var t = 0; t < animTrains.length; t++) {
       var m = animTrains[t], st = trainState[m.run];
       var n = m.nCars, tp, d, op, ci, hx, hy;
@@ -1175,10 +1229,10 @@
         if (op) {
           c.globalAlpha = op;
           for (ci = 0; ci < n; ci++) {
-            var b = bodyAt(seg, arcPx + dir * (ci - (n - 1) / 2) * STEP, dir, LANE);
-            drawCar(c, A, e, f, b.x, b.y, b.cos, b.sin, m);
+            var b = bodyAt(seg, arcPx + dir * (ci - (n - 1) / 2) * STEP, dir, LANE, HALF);
+            drawCar(c, A, b.x * K + ox, b.y * K + oy, b.cos, b.sin, m);
           }
-          var hb = bodyAt(seg, arcPx + dir * ((n / 2) * STEP + 1), dir, LANE);
+          var hb = bodyAt(seg, arcPx + dir * ((n / 2) * STEP + sz / K), dir, LANE, HALF);
           hx = hb.x; hy = hb.y;
         }
       } else { // off-rail: straight consist at the dead-reckoned position
@@ -1193,46 +1247,175 @@
           var lx = m.cosH * LANE, ly = m.sinH * LANE;
           for (ci = 0; ci < n; ci++) {
             var off2 = (ci - (n - 1) / 2) * STEP;
-            drawCar(c, A, e, f, tp[0] + off2 * cosA + lx, tp[1] + off2 * sinA + ly, cosA, sinA, m);
+            drawCar(c, A, (tp[0] + off2 * cosA + lx) * K + ox, (tp[1] + off2 * sinA + ly) * K + oy, cosA, sinA, m);
           }
-          hx = tp[0] + ((n / 2) * STEP + 1) * cosA + lx;
-          hy = tp[1] + ((n / 2) * STEP + 1) * sinA + ly;
+          hx = tp[0] + ((n / 2) * STEP + sz / K) * cosA + lx;
+          hy = tp[1] + ((n / 2) * STEP + sz / K) * sinA + ly;
         }
       }
       if (!op) continue;
-      c.setTransform(A, 0, 0, A, e, f);
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
       c.fillStyle = m.head;
-      c.beginPath(); c.arc(hx, hy, m.hr, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(hx * K + ox, hy * K + oy, m.hr * sz, 0, Math.PI * 2); c.fill();
       if (m.label) {
-        c.fillStyle = "#e8eaf0"; c.font = "13px " + FONT;
+        c.fillStyle = "#e8eaf0";
         c.textAlign = m.pos < 2 ? "left" : "right";
-        c.fillText(m.label, tp[0] + (m.pos < 2 ? 14 : -14), tp[1] + (m.pos % 2 ? -13 : 15));
+        c.fillText(m.label, tp[0] * K + ox + (m.pos < 2 ? 14 : -14) * sz, tp[1] * K + oy + (m.pos % 2 ? -13 : 15) * sz);
       }
     }
     c.globalAlpha = 1;
   }
 
   function visOp(d, radius, m) {
+    if (userMoved()) return m.suspect ? 0.45 : (m.bg ? 0.6 : 1); // exploring: show everything loaded
     if (!zooming && !showUnsure && d > radius * 1.02) return 0;
     if (m.suspect || d > radius * 1.02) return 0.45;
     return m.bg ? 0.6 : 1;
   }
 
-  // full redraw: rings, cached static layer (or live vectors mid-zoom), trains, marker
+  // full redraw: rings, cached static layer (or live vectors when the camera moved), trains, marker
   function drawFrame() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, cv.width, cv.height);
     var p = animProject;
     if (!p) return;
-    var A = dpr * zoomK, e = dpr * p.cx * (1 - zoomK), f = dpr * p.cy * (1 - zoomK);
+    var xf = frameXf(p);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (ringsOn) drawRings(ctx, p);
-    if (zoomK === 1) ctx.drawImage(staticCv, 0, 0, viewW, viewH);
-    else { ctx.setTransform(A, 0, 0, A, e, f); drawScene(ctx); }
-    drawTrains(ctx, A, e, f);
+    if (ringsOn) drawRings(ctx, p, xf);
+    if (xf.K === 1 && !userTx && !userTy) ctx.drawImage(staticCv, 0, 0, viewW, viewH);
+    else drawScene(ctx, xf);
+    drawTrains(ctx, xf);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     drawMarker(ctx, p);
   }
+
+  /* ---------- pan + pinch (touch), drag + wheel (mouse) ---------- */
+  var MIN_UK = 0.1, MAX_UK = 8;
+  var gesture = null;    // previous touch frame: { x, y, dist, n }
+  var tapInfo = null;    // for double-tap zoom: { x, y, t, moved }
+  var lastTap = null;
+  var camAnim = null;    // eased camera move: { t0, dur, from: [k, x, y], to: [k, x, y] }
+  var lastInteract = 0;  // ms; the kiosk drifts back to the default view after a while
+  var RECENTER_IDLE_MS = 30000;
+  var recenterBtn = document.getElementById("recenter");
+
+  // camera after zooming by s around screen point (mx, my)
+  function zoomedCam(k, tx, ty, mx, my, s) {
+    var nk = Math.max(MIN_UK, Math.min(MAX_UK, k * s));
+    s = nk / k;
+    var p = animProject;
+    return [nk, (mx - p.cx) * (1 - s) + tx * s, (my - p.cy) * (1 - s) + ty * s];
+  }
+  function setCam(c3) {
+    var was = userMoved();
+    userK = c3[0]; userTx = c3[1]; userTy = c3[2];
+    if (Math.abs(userK - 1) < 1e-3 && Math.abs(userTx) < 0.5 && Math.abs(userTy) < 0.5) { userK = 1; userTx = 0; userTy = 0; }
+    var now = userMoved();
+    recenterBtn.className = now ? "show" : "";
+    if (now !== was) rerenderView(); // widen/narrow which trains are loaded into the view
+  }
+  // instant snap home on station/mode change (the caller re-renders the map itself)
+  function resetCam() { camAnim = null; gesture = null; userK = 1; userTx = 0; userTy = 0; recenterBtn.className = ""; }
+  function animateCam(to, dur) {
+    camAnim = { t0: Date.now(), dur: dur, from: [userK, userTx, userTy], to: to };
+  }
+  function stepCam() {
+    if (!camAnim) {
+      if (userMoved() && !gesture && Date.now() - lastInteract > RECENTER_IDLE_MS) animateCam([1, 0, 0], 700);
+      return;
+    }
+    var a = camAnim, t = Math.min(1, (Date.now() - a.t0) / a.dur), e = ease(t);
+    // zoom interpolates geometrically so it feels even in and out
+    setCam([a.from[0] * Math.pow(a.to[0] / a.from[0], e),
+      a.from[1] + (a.to[1] - a.from[1]) * e, a.from[2] + (a.to[2] - a.from[2]) * e]);
+    if (t >= 1) camAnim = null;
+  }
+  function rerenderView() {
+    if (zooming) return;
+    if (mode === "bus") { if (busStop) renderBusMap(false); }
+    else if (lastArrivals && lastArrivalsFor === curId) renderMap(lastArrivals, false);
+  }
+  function canGesture() { return animProject && !zooming; }
+  function touched() { lastInteract = Date.now(); camAnim = null; }
+
+  function gestureOf(list) {
+    var n = list.length, x = 0, y = 0;
+    for (var i = 0; i < n; i++) { x += list[i].clientX; y += list[i].clientY; }
+    x /= n; y /= n;
+    var dist = 0;
+    if (n >= 2) {
+      var dx = list[0].clientX - list[1].clientX, dy = list[0].clientY - list[1].clientY;
+      dist = Math.sqrt(dx * dx + dy * dy);
+    }
+    return { x: x, y: y, dist: dist, n: n };
+  }
+  function moveBy(g) {
+    var prev = gesture;
+    gesture = g;
+    if (!prev || prev.n !== g.n) return; // finger count changed: re-anchor, don't jump
+    var c3 = [userK, userTx + g.x - prev.x, userTy + g.y - prev.y];
+    if (g.n >= 2 && prev.dist > 0) c3 = zoomedCam(c3[0], c3[1], c3[2], g.x, g.y, g.dist / prev.dist);
+    setCam(c3);
+  }
+
+  cv.addEventListener("touchstart", function (e) {
+    e.preventDefault();
+    if (!canGesture()) return;
+    touched();
+    gesture = gestureOf(e.touches);
+    tapInfo = e.touches.length === 1 ? { x: gesture.x, y: gesture.y, t: Date.now(), moved: false } : null;
+  }, { passive: false });
+  cv.addEventListener("touchmove", function (e) {
+    e.preventDefault();
+    if (!canGesture() || !gesture) return;
+    touched();
+    var g = gestureOf(e.touches);
+    if (tapInfo && (Math.abs(g.x - tapInfo.x) > 8 || Math.abs(g.y - tapInfo.y) > 8)) tapInfo.moved = true;
+    moveBy(g);
+  }, { passive: false });
+  function touchEnd(e) {
+    if (!gesture) return;
+    touched();
+    if (e.touches.length) { gesture = gestureOf(e.touches); return; } // lifted one of two fingers
+    gesture = null;
+    var tp = tapInfo; tapInfo = null;
+    if (!tp || tp.moved || Date.now() - tp.t > 300) { lastTap = null; return; }
+    if (lastTap && Date.now() - lastTap.t < 350 && Math.abs(tp.x - lastTap.x) < 30 && Math.abs(tp.y - lastTap.y) < 30) {
+      lastTap = null;
+      animateCam(zoomedCam(userK, userTx, userTy, tp.x, tp.y, 2), 300); // double-tap: zoom in there
+    } else lastTap = { x: tp.x, y: tp.y, t: Date.now() };
+  }
+  cv.addEventListener("touchend", touchEnd);
+  cv.addEventListener("touchcancel", touchEnd);
+
+  var mouseDrag = null;
+  cv.addEventListener("mousedown", function (e) {
+    if (!canGesture()) return;
+    touched();
+    mouseDrag = { x: e.clientX, y: e.clientY };
+    cv.style.cursor = "grabbing";
+  });
+  window.addEventListener("mousemove", function (e) {
+    if (!mouseDrag) return;
+    touched();
+    setCam([userK, userTx + e.clientX - mouseDrag.x, userTy + e.clientY - mouseDrag.y]);
+    mouseDrag = { x: e.clientX, y: e.clientY };
+  });
+  window.addEventListener("mouseup", function () { mouseDrag = null; cv.style.cursor = ""; });
+  cv.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    if (!canGesture()) return;
+    touched();
+    setCam(zoomedCam(userK, userTx, userTy, e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015)));
+  }, { passive: false });
+  cv.addEventListener("dblclick", function (e) {
+    if (!canGesture()) return;
+    touched();
+    animateCam(zoomedCam(userK, userTx, userTy, e.clientX, e.clientY, e.shiftKey ? 0.5 : 2), 300);
+  });
+  recenterBtn.onclick = function () { touched(); animateCam([1, 0, 0], 500); };
+  // stop iOS from zooming the whole page when a pinch starts on the header or board
+  document.addEventListener("gesturestart", function (e) { e.preventDefault(); });
 
   // 30fps animation loop; pauses when the tab is hidden
   function animLoop(now) {
@@ -1244,6 +1427,7 @@
     lastFrameT = now;
     advanceTrains(dt);
     stepZoom();
+    stepCam();
     drawFrame();
   }
 
@@ -1280,6 +1464,7 @@
   }
 
   function stationChanged() {
+    resetCam();
     store("cta_mapid", curId);
     updateStationBtn();
     renderFavs();
@@ -1365,6 +1550,7 @@
   function setMode(m) {
     if (m === mode) return;
     mode = m; store("cta_mode", m);
+    resetCam();
     paintModeBtn(); applyModeChrome(); closePicker();
     stopAllTimers();
     trainState = {}; animTrains = []; trackPx = null; mapSig = null;
@@ -1559,6 +1745,7 @@
 
   /* ---------- bus polling + data ---------- */
   function busStopChanged() {
+    resetCam();
     updateStationBtn();
     board.innerHTML = ""; showStatus("Loading…");
     zoomPending = true;
@@ -1659,7 +1846,7 @@
     if (!cur || cur.lat == null) { clearMap(); return; }
     var w = mapEl.clientWidth, h = mapEl.clientHeight;
     if (!w || !h) return;
-    var cx = w / 2, cy = h / 2;
+    var fr = mapFrame(w, h), cx = fr.cx, cy = fr.cy;
 
     var predMin = {};
     for (var pi = 0; pi < busPreds.length; pi++) predMin[busPreds[pi].vid] = busPreds[pi].min;
@@ -1675,9 +1862,9 @@
     }
     var radius = busVehicles.length ? Math.min(5, Math.max(1.5, nearest * 1.6)) : 2.0;
     if (!zoomPending && lastRadiusFor === "bus:" + cur.id && lastRadius
-        && Math.abs(radius - lastRadius) / lastRadius < 0.3) radius = lastRadius;
+        && (userMoved() || Math.abs(radius - lastRadius) / lastRadius < 0.3)) radius = lastRadius;
     lastRadius = radius; lastRadiusFor = "bus:" + cur.id;
-    var half = Math.min(cx, cy) - 24, scale = half / radius;
+    var scale = fr.half / radius;
     function px(lat, lon) {
       var dx = (lon - cur.lon) * 111.32 * Math.cos(cur.lat * Math.PI / 180);
       var dy = (lat - cur.lat) * 110.574;
@@ -1701,7 +1888,7 @@
     }
 
     var newDpr = window.devicePixelRatio || 1;
-    var sig = "bus:" + cur.id + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "@" + newDpr + "|" + drawRoutes.join(",");
+    var sig = "bus:" + cur.id + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "c" + Math.round(cy) + "@" + newDpr + "|" + drawRoutes.join(",");
     var rebuildStatic = zoomPending || sig !== mapSig || !staticItems;
 
     if (rebuildStatic) {
@@ -1724,21 +1911,21 @@
       var items = { grey: [], stripes: [], stations: [], stripeW: 4, stripeA: 0.8, nameFont: "bold 14px " };
       for (var dc = 0; dc < drawRoutes.length; dc++) {
         var dcol = busColors[drawRoutes[dc]] || BUS_FALLBACK, cs = trackPx[drawRoutes[dc]].draw;
-        for (var c = 0; c < cs.length; c++) items.stripes.push({ pts: cs[c].pts, color: dcol });
+        for (var c = 0; c < cs.length; c++) items.stripes.push({ pts: cs[c].pts, off: 0, color: dcol });
       }
       dpr = newDpr;
       sizeCanvas(w, h);
       staticItems = items;
       ringsOn = !zoomPending;
       staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawScene(staticCtx);
+      drawScene(staticCtx, IDENTITY_XF);
       mapSig = sig;
     }
 
     animTrains = [];
     var ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"], vi = 0;
     for (var t = 0; t < vlist.length; t++) {
-      if (vlist[t].d > radius * 1.6) continue;
+      if (vlist[t].d > radius * 1.6 && !userMoved()) continue;
       var b = vlist[t].v, idx = vi++;
       var run = "b" + b.vid;
       var sinH = Math.sin((b.heading || 0) * Math.PI / 180), cosH = Math.cos((b.heading || 0) * Math.PI / 180);
