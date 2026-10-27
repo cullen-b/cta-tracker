@@ -267,15 +267,26 @@
   #bus-crumb b { color: #e8eaf0; }
   @media (max-width: 700px) {
     /* phones: arrivals become a bottom sheet; mapFrame() centers the station above it */
+    /* every direction stays visible; each card shows 3 rows and scrolls inside itself */
     #board {
       top: auto; left: 0; right: 0; bottom: 0;
-      display: block; max-height: 42%;
+      display: block; max-height: 75%;
       overflow-y: auto; -webkit-overflow-scrolling: touch;
       padding: 0 10px 10px; padding-bottom: max(10px, env(safe-area-inset-bottom));
       pointer-events: auto;
     }
-    .col { width: auto; max-width: none; max-height: none; overflow: visible; margin-top: 8px; padding: 0 12px 4px; }
-    #recenter { bottom: auto; top: 58%; margin-top: -48px; right: 12px; }
+    .col {
+      width: auto; max-width: none; margin-top: 8px; padding: 0 12px;
+      max-height: 158px; /* h2 (32) + 3 rows (42) */
+      overflow-y: auto; -webkit-overflow-scrolling: touch;
+    }
+    .col h2 {
+      position: -webkit-sticky; position: sticky; top: 0; z-index: 1;
+      height: 32px; line-height: 20px; padding: 10px 0 2px;
+      background: #0d111a;
+    }
+    .row { height: 42px; padding: 0; }
+    #recenter { bottom: auto; top: 104px; right: 12px; }
     header { padding-left: max(10px, env(safe-area-inset-left)); padding-right: max(10px, env(safe-area-inset-right)); }
     #station-btn { -webkit-flex: 1; flex: 1; min-width: 0; max-width: none; }
     .hbtn { margin-left: 6px; }
@@ -723,10 +734,11 @@
   }
 
   // where the station sits and how much room the auto-zoom gets; on phones the
-  // board is a bottom sheet, so center the map in the space above it
+  // board is a bottom sheet, so center the map in the space left above it
   function mapFrame(w, h) {
     if (w > 700) return { cx: w / 2, cy: h / 2, half: Math.min(w, h) / 2 - 24 };
-    var top = favBar.offsetHeight ? 104 : 60, bottom = h * 0.58;
+    var top = favBar.offsetHeight ? 104 : 60, bottom = h - board.offsetHeight;
+    if (bottom - top < 160) bottom = top + 160;
     return { cx: w / 2, cy: (top + bottom) / 2, half: Math.min(w / 2, (bottom - top) / 2) - 14 };
   }
 
