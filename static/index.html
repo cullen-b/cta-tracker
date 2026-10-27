@@ -19,7 +19,7 @@
 
   /* full-screen map behind everything */
   #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 0; }
-  #map svg { display: block; width: 100%; height: 100%; }
+  #map canvas { display: block; }
 
   header {
     position: absolute; top: 0; left: 0; right: 0;
@@ -313,7 +313,7 @@
   var posTimer = null;
   var animRAF = null;
   var lastFrameT = 0;
-  var zoomTimer = null;
+  var zoomAnim = null; // in-flight zoom: { t0, from, to, dur, done }
   var zooming = false;
   var zoomPending = false;
   var showUnsure = read("cta_unsure") === "1";
@@ -630,10 +630,28 @@
     return best;
   }
 
-  /* ---------- map ---------- */
+  /* ---------- map (one canvas; static layer cached in an offscreen bitmap) ---------- */
+  var FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
+  var cv = document.createElement("canvas");
+  mapEl.appendChild(cv);
+  var ctx = cv.getContext("2d");
+  var staticCv = document.createElement("canvas"); // tracks + stations, redrawn only when the view changes
+  var staticCtx = staticCv.getContext("2d");
+  var dpr = 1, viewW = 0, viewH = 0;
+  var staticItems = null; // px-space draw lists for the current view
+  var zoomK = 1;          // scale around the station during fly-in / pull-back
+  var ringsOn = true;
+
+  function sizeCanvas(w, h) {
+    viewW = w; viewH = h;
+    cv.width = staticCv.width = Math.round(w * dpr);
+    cv.height = staticCv.height = Math.round(h * dpr);
+    cv.style.width = w + "px"; cv.style.height = h + "px";
+  }
+
   function renderMap(arrivals, fresh) {
     var cur = stationById[curId];
-    if (!cur) { mapEl.innerHTML = ""; return; }
+    if (!cur) { animProject = null; staticItems = null; drawFrame(); return; }
     var w = mapEl.clientWidth, h = mapEl.clientHeight;
     if (!w || !h) return;
     var cx = w / 2, cy = h / 2;
@@ -733,11 +751,12 @@
       }
       return chains;
     }
-    // Only rebuild the heavy static scaffold (tracks, stations, rings, marker)
-    // when the view actually changes. A plain data refresh keeps it in place and
-    // just swaps the light train layer — so the map never blinks.
-    var sig = curId + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "|" + (trackRoutes ? 1 : 0);
-    var rebuildStatic = zoomPending || sig !== mapSig || !document.getElementById("zoomG");
+    // Only rebuild the static layer (tracks, stations) when the view actually
+    // changes. A plain data refresh just rebinds the trains — the cached
+    // bitmap stays, so the map never blinks.
+    var newDpr = window.devicePixelRatio || 1;
+    var sig = curId + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "@" + newDpr + "|" + (trackRoutes ? 1 : 0);
+    var rebuildStatic = zoomPending || sig !== mapSig || !staticItems;
 
     if (rebuildStatic && trackRoutes) {
       trackPx = {};
@@ -753,12 +772,12 @@
       }
     }
 
-    function segmentPath(segPx) {
-      var pts = "";
+    function geomKey(segPx) {
+      var key = "";
       for (var i = 0; i < segPx.pts.length; i++) {
-        pts += (i ? " " : "") + Math.round(segPx.pts[i][0]) + "," + Math.round(segPx.pts[i][1]);
+        key += Math.round(segPx.pts[i][0]) + "," + Math.round(segPx.pts[i][1]) + " ";
       }
-      return pts;
+      return key;
     }
     function offsetPts(pts, off) {
       var out = [];
@@ -770,46 +789,27 @@
       }
       return out;
     }
-    function pathStr(pts) {
-      var s3 = "";
-      for (var i = 0; i < pts.length; i++) {
-        s3 += (i ? " " : "") + Math.round(pts[i][0] * 10) / 10 + "," + Math.round(pts[i][1] * 10) / 10;
-      }
-      return s3;
-    }
 
     animProject = { px: px, radius: radius, cur: cur, scale: scale, cx: cx, cy: cy };
 
     if (rebuildStatic) {
-      var ringsOp = zoomPending ? 0 : 1;
-      var rings = [radius / 2, radius];
-      var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">';
-      svg += '<g id="rings" opacity="' + ringsOp + '">';
-      for (var r = 0; r < rings.length; r++) {
-        var km = rings[r];
-        svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (km * scale)
-          + '" fill="none" stroke="#1e2430" stroke-width="1"/>'
-          + '<text x="' + (cx + 4) + '" y="' + (cy - km * scale + 14)
-          + '" fill="#4b5568" font-size="11">' + (Math.round(km * 0.621371 * 10) / 10) + ' mi</text>';
-      }
-      svg += "</g><g id='zoomG'>";
+      var items = { grey: [], stripes: [], stations: [] };
       if (trackRoutes && trackPx) {
         var route, segs, k;
         for (route in trackPx) { // whole network in grey
           if (cur.lines.indexOf(route) !== -1) continue;
           segs = trackPx[route].draw;
-          for (k = 0; k < segs.length; k++) {
-            svg += '<polyline points="' + segmentPath(segs[k]) + '" fill="none" stroke="#252d3b" stroke-width="2"/>';
-          }
+          for (k = 0; k < segs.length; k++) items.grey.push(segs[k].pts);
         }
+        // lines sharing a corridor are drawn side by side as parallel stripes
         var byGeom = {}, geomOrder = [];
         for (var c = 0; c < cur.lines.length; c++) {
           route = cur.lines[c];
           segs = (trackPx[route] || {}).draw || [];
           for (k = 0; k < segs.length; k++) {
-            var pts2 = segmentPath(segs[k]);
-            if (!byGeom[pts2]) { byGeom[pts2] = { routes: [], seg: segs[k] }; geomOrder.push(pts2); }
-            byGeom[pts2].routes.push(route);
+            var gk = geomKey(segs[k]);
+            if (!byGeom[gk]) { byGeom[gk] = { routes: [], seg: segs[k] }; geomOrder.push(gk); }
+            byGeom[gk].routes.push(route);
           }
         }
         var SPACING = 5;
@@ -819,27 +819,23 @@
           shared.sort(function (x, y) { return LINE_SEQ.indexOf(x) - LINE_SEQ.indexOf(y); });
           for (var si = 0; si < shared.length; si++) {
             var off = (si - (shared.length - 1) / 2) * SPACING;
-            var pl = off === 0 ? entry.seg.pts : offsetPts(entry.seg.pts, off);
-            svg += '<polyline points="' + pathStr(pl) + '" fill="none" stroke="' + (COLORS[shared[si]] || "#888")
-              + '" stroke-width="4.5" stroke-linecap="round" opacity="0.9"/>';
+            items.stripes.push({ pts: off === 0 ? entry.seg.pts : offsetPts(entry.seg.pts, off),
+              color: COLORS[shared[si]] || "#888" });
           }
         }
       }
-      for (var s = 0; s < stationList.length; s++) { // stations + grey names
+      for (var s = 0; s < stationList.length; s++) {
         var stn = stationList[s];
         if (stn.map_id === cur.map_id) continue;
         var p2 = px(stn.lat, stn.lon);
-        svg += '<circle cx="' + p2[0] + '" cy="' + p2[1] + '" r="2.5" fill="#4b5568"/>'
-          + '<text x="' + p2[0] + '" y="' + (p2[1] + 12) + '" fill="#565f6e" font-size="9.5" text-anchor="middle">'
-          + esc(stn.name) + "</text>";
+        items.stations.push({ x: p2[0], y: p2[1], name: stn.name });
       }
-      svg += "<g id='trainLayer'></g></g>"; // trains fill this, tracks above stay put
-      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="#e8eaf0" stroke-width="1.5" opacity="0.45"/>'
-        + '<circle cx="' + cx + '" cy="' + cy + '" r="8" fill="#e8eaf0" stroke="#0b0e14" stroke-width="2"/>'
-        + '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="#0b0e14"/>'
-        + '<text x="' + cx + '" y="' + (cy + 30) + '" fill="#e8eaf0" font-size="15" font-weight="bold" text-anchor="middle">'
-        + esc(cur.name) + "</text></svg>";
-      mapEl.innerHTML = svg;
+      dpr = newDpr;
+      sizeCanvas(w, h);
+      staticItems = items;
+      ringsOn = !zoomPending;
+      staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawScene(staticCtx);
       mapSig = sig;
     }
 
@@ -851,32 +847,37 @@
         var bt = lastPositions[bp];
         if (activeRuns[bt.run]) continue;
         var bd = kmBetween(cur.lat, cur.lon, bt.lat, bt.lon);
-        if (bd > radius * 1.6) continue; // keep the DOM small
+        if (bd > radius * 1.6) continue; // skip trains far outside the view
         trains.push({ a: bt, d: bd, suspect: false, bg: true });
       }
     }
 
-    // trains: bind each to a position along its chain, build the (small) train
-    // layer only — the static scaffold above is untouched on a data refresh.
+    // trains: bind each to a position along its chain; drawn every frame by drawFrame
     animTrains = [];
     var ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
-    var tsvg = "";
     for (var t = 0; t < trains.length; t++) {
       var a2 = trains[t].a;
       var bg = !!trains[t].bg;
-      var col = bg ? "#39424f" : (COLORS[a2.route] || "#888");
-      var nCars = CARS[a2.route] || 6;
       var rad = (a2.heading || 0) * Math.PI / 180;
       var sinH = Math.sin(rad), cosH = Math.cos(rad);
       var run = a2.run || ("t" + t);
+      var label = null;
+      if (!bg) {
+        label = a2.delayed ? "dly" : (a2.approaching || a2.min <= 1 ? "due" : a2.min + "m");
+        if (trains[t].suspect) label += "?";
+        if (a2.heading != null) label = ARROWS[Math.round(a2.heading / 45) % 8] + label;
+      }
 
       var snap = a2.heading == null ? null : snapToTrack(a2.route, px(a2.lat, a2.lon));
       var onTrack = !!(snap && snap.d2 < 900);
       var meta = {
-        run: run, bg: bg, suspect: trains[t].suspect, nCars: nCars, pos: t % 4,
+        run: run, bg: bg, suspect: trains[t].suspect, nCars: CARS[a2.route] || 6, pos: t % 4,
         onTrack: onTrack, seg: null, chainIdx: -1, dir: 1,
         lat: a2.lat, lon: a2.lon, sinH: sinH, cosH: cosH, heading: a2.heading,
-        gEl: null, carEls: [], headEl: null, labelEl: null
+        fill: bg ? "#39424f" : (COLORS[a2.route] || "#888"),
+        stroke: bg ? "#5a6474" : "#f2f4f8",
+        head: bg ? "#78828f" : "#fff7cc",
+        label: label
       };
       if (onTrack) {
         var at = pointAtArc(snap.seg, snap.arc);
@@ -894,41 +895,16 @@
           vKms: a2.heading == null ? 0 : V_DEFAULT, tgtTime: lastFetch || 0 };
       }
       animTrains.push(meta);
-
-      var body = "", carStroke = bg ? "#5a6474" : "#f2f4f8";
-      for (var ci = 0; ci < nCars; ci++) {
-        body += '<rect id="trg' + t + 'c' + ci + '" x="-4.5" y="-4" width="9" height="8" rx="2.2" fill="' + col
-          + '" stroke="' + carStroke + '" stroke-width="1.2"/>';
-      }
-      body += '<circle id="trg' + t + 'h" r="2.4" fill="' + (bg ? "#78828f" : "#fff7cc") + '"/>';
-      tsvg += '<g id="trg' + t + '" opacity="0">' + body + "</g>";
-      if (!bg) {
-        var anchorAttr = t % 4 < 2 ? "" : ' text-anchor="end"';
-        var label = a2.delayed ? "dly" : (a2.approaching || a2.min <= 1 ? "due" : a2.min + "m");
-        if (trains[t].suspect) label += "?";
-        if (a2.heading != null) label = ARROWS[Math.round(a2.heading / 45) % 8] + label;
-        tsvg += '<text id="trl' + t + '" x="0" y="0" fill="#e8eaf0" font-size="13"' + anchorAttr + ">" + label + "</text>";
-      }
     }
-    var layer = document.getElementById("trainLayer");
-    if (layer) layer.innerHTML = tsvg;
 
-    // cache element refs so the animation loop never touches getElementById
-    for (var tc = 0; tc < animTrains.length; tc++) {
-      var m = animTrains[tc];
-      m.gEl = document.getElementById("trg" + tc);
-      m.carEls = [];
-      for (var cc = 0; cc < m.nCars; cc++) m.carEls.push(document.getElementById("trg" + tc + "c" + cc));
-      m.headEl = document.getElementById("trg" + tc + "h");
-      m.labelEl = document.getElementById("trl" + tc);
-    }
     if (zoomPending) zooming = true; // unclamped placement from the very first frame
-    paintTrains();
     if (!animRAF) animRAF = requestAnimationFrame(animLoop);
 
     if (zoomPending) {
       zoomPending = false;
       playZoomIn(cx, cy, radius);
+    } else {
+      drawFrame();
     }
   }
 
@@ -943,50 +919,41 @@
 
   function ease(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 
-  function animateZoom(g, cx, cy, kFrom, kTo, dur, done) {
-    if (zoomTimer) clearInterval(zoomTimer);
+  // zoom is just a scale factor around the station; animLoop steps it each frame
+  function animateZoom(kFrom, kTo, dur, done) {
     zooming = true;
-    var t0 = Date.now();
-    function apply(k) {
-      g.setAttribute("transform", "translate(" + (cx * (1 - k)) + "," + (cy * (1 - k)) + ") scale(" + k + ")");
-    }
-    apply(kFrom);
-    zoomTimer = setInterval(function () {
-      var t = Math.min(1, (Date.now() - t0) / dur);
-      apply(kFrom + (kTo - kFrom) * ease(t));
-      if (t >= 1) {
-        clearInterval(zoomTimer);
-        zoomTimer = null;
-        done();
-      }
-    }, 33);
+    zoomAnim = { t0: Date.now(), from: kFrom, to: kTo, dur: dur, done: done };
+    zoomK = kFrom;
+    drawFrame();
+  }
+
+  function stepZoom() {
+    var z = zoomAnim;
+    if (!z) return;
+    var t = Math.min(1, (Date.now() - z.t0) / z.dur);
+    zoomK = z.from + (z.to - z.from) * ease(t);
+    if (t >= 1) { zoomAnim = null; z.done(); }
   }
 
   function playZoomIn(cx, cy, radius) {
     var cur = stationById[curId];
-    var g = document.getElementById("zoomG");
-    var ringsG = document.getElementById("rings");
-    if (!g) { zooming = false; return; }
+    if (!staticItems) { zooming = false; drawFrame(); return; }
     var k0 = radius / (systemRadiusFrom(cur) * 1.1 + 1);
-    if (ringsG) ringsG.setAttribute("opacity", "0");
-    animateZoom(g, cx, cy, k0, 1, 1800, function () {
+    ringsOn = false;
+    animateZoom(k0, 1, 1800, function () {
       zooming = false;
-      g.removeAttribute("transform");
-      if (ringsG) ringsG.setAttribute("opacity", "1");
-      paintTrains(); // hide out-of-view trains immediately
+      zoomK = 1;
+      ringsOn = true;
     });
   }
 
   // smooth pull-back from the old station before flying into the new one
   function playZoomOut(done) {
-    var g = document.getElementById("zoomG");
-    if (!g || !animProject) { done(); return; }
+    if (!staticItems || !animProject) { done(); return; }
     var p = animProject;
     var k1 = p.radius / (systemRadiusFrom(p.cur) * 1.1 + 1);
-    var ringsG = document.getElementById("rings");
-    if (ringsG) ringsG.setAttribute("opacity", "0");
-    paintTrains(); // reveal current positions before pulling back
-    animateZoom(g, p.cx, p.cy, 1, k1, 1100, done);
+    ringsOn = false;
+    animateZoom(1, k1, 1100, done);
   }
 
   // called once per data update: fold the fresh GPS fix into the train's
@@ -1041,87 +1008,186 @@
     }
   }
 
-  // place one car/headlight at arc-length s: angle and side-offset both come
+  // pose of one car/headlight at arc-length s: angle and side-offset both come
   // from a chord across the element's own length, so it turns smoothly and the
   // "ride beside the line" offset eases to the centerline through sharp bends
-  function placeBody(el, seg, s, dir, lane) {
-    if (!el) return;
+  function bodyAt(seg, s, dir, lane) {
     var half = 4.6;
     var pC = pointAtArc(seg, s);
     var pA = pointAtArc(seg, s - half);
     var pB = pointAtArc(seg, s + half);
     var cxv = pB.x - pA.x, cyv = pB.y - pA.y;
     var clen = Math.sqrt(cxv * cxv + cyv * cyv) || 1;
-    var ang = Math.atan2(cyv, cxv) * 180 / Math.PI;
     var straight = clen / (2 * half); if (straight > 1) straight = 1; // 1 = straight, →0 at a hard bend
     var off = lane * straight * dir;
-    el.setAttribute("transform", "translate("
-      + (pC.x - off * cyv / clen) + "," + (pC.y + off * cxv / clen) + ") rotate(" + ang + ")");
+    var cos = cxv / clen, sin = cyv / clen;
+    if (!cxv && !cyv) cos = 1;
+    return { x: pC.x - off * sin, y: pC.y + off * cos, cos: cos, sin: sin };
   }
 
-  // draw every train from its current smoothed state (DOM writes only)
-  function paintTrains() {
-    if (!animProject) return;
+  function strokePoly(c, pts) {
+    c.beginPath();
+    c.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
+    c.stroke();
+  }
+
+  // tracks + stations in px space; cached into staticCv, or drawn live while zooming
+  function drawScene(c) {
+    var it = staticItems;
+    if (!it) return;
+    var i;
+    c.lineCap = "butt";
+    c.strokeStyle = "#252d3b"; c.lineWidth = 2;
+    c.beginPath(); // whole grey network in one path
+    for (i = 0; i < it.grey.length; i++) {
+      var g = it.grey[i];
+      c.moveTo(g[0][0], g[0][1]);
+      for (var j = 1; j < g.length; j++) c.lineTo(g[j][0], g[j][1]);
+    }
+    c.stroke();
+    c.lineCap = "round"; c.lineWidth = 4.5; c.globalAlpha = 0.9;
+    for (i = 0; i < it.stripes.length; i++) {
+      c.strokeStyle = it.stripes[i].color;
+      strokePoly(c, it.stripes[i].pts);
+    }
+    c.globalAlpha = 1;
+    c.fillStyle = "#4b5568";
+    c.beginPath();
+    for (i = 0; i < it.stations.length; i++) {
+      var s = it.stations[i];
+      c.moveTo(s.x + 2.5, s.y);
+      c.arc(s.x, s.y, 2.5, 0, Math.PI * 2);
+    }
+    c.fill();
+    c.fillStyle = "#565f6e"; c.font = "9.5px " + FONT;
+    c.textAlign = "center"; c.textBaseline = "alphabetic";
+    for (i = 0; i < it.stations.length; i++) {
+      c.fillText(it.stations[i].name, it.stations[i].x, it.stations[i].y + 12);
+    }
+  }
+
+  function drawRings(c, p) {
+    var rings = [p.radius / 2, p.radius];
+    c.strokeStyle = "#1e2430"; c.lineWidth = 1;
+    c.fillStyle = "#4b5568"; c.font = "11px " + FONT;
+    c.textAlign = "left"; c.textBaseline = "alphabetic";
+    for (var r = 0; r < rings.length; r++) {
+      var rr = rings[r] * p.scale;
+      c.beginPath(); c.arc(p.cx, p.cy, rr, 0, Math.PI * 2); c.stroke();
+      c.fillText((Math.round(rings[r] * 0.621371 * 10) / 10) + " mi", p.cx + 4, p.cy - rr + 14);
+    }
+  }
+
+  function drawMarker(c, p) {
+    c.beginPath(); c.arc(p.cx, p.cy, 14, 0, Math.PI * 2);
+    c.globalAlpha = 0.45; c.strokeStyle = "#e8eaf0"; c.lineWidth = 1.5; c.stroke();
+    c.globalAlpha = 1;
+    c.beginPath(); c.arc(p.cx, p.cy, 8, 0, Math.PI * 2);
+    c.fillStyle = "#e8eaf0"; c.fill();
+    c.strokeStyle = "#0b0e14"; c.lineWidth = 2; c.stroke();
+    c.beginPath(); c.arc(p.cx, p.cy, 3, 0, Math.PI * 2);
+    c.fillStyle = "#0b0e14"; c.fill();
+    c.fillStyle = "#e8eaf0"; c.font = "bold 15px " + FONT; c.textAlign = "center";
+    c.fillText(p.cur.name, p.cx, p.cy + 30);
+  }
+
+  // car body: 9x8 rounded rect centered on the origin
+  function carPath(c) {
+    var x = -4.5, y = -4, w = 9, h = 8, r = 2.2;
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  // A/e/f: the frame's uniform scale + translation, so each car is one setTransform
+  function drawCar(c, A, e, f, x, y, cos, sin) {
+    c.setTransform(A * cos, A * sin, -A * sin, A * cos, A * x + e, A * y + f);
+    carPath(c);
+    c.fill(); c.stroke();
+  }
+
+  function drawTrains(c, A, e, f) {
     var px = animProject.px, radius = animProject.radius, cur = animProject.cur;
     var scale = animProject.scale, ccx = animProject.cx, ccy = animProject.cy;
     var STEP = 11, LANE = 8;
+    c.lineWidth = 1.2;
     for (var t = 0; t < animTrains.length; t++) {
-      var m = animTrains[t], st = trainState[m.run], g = m.gEl;
-      if (!g) continue;
-      var n = m.nCars, tp, d, dir, seg;
+      var m = animTrains[t], st = trainState[m.run];
+      var n = m.nCars, tp, d, op, ci, hx, hy;
+      c.fillStyle = m.fill; c.strokeStyle = m.stroke;
 
       if (m.onTrack && st && !st.offTrack && m.seg) {
-        seg = m.seg; dir = m.dir;
+        var seg = m.seg, dir = m.dir;
         var arcPx = st.frac * seg.total;
         var at0 = pointAtArc(seg, arcPx);
         tp = [at0.x, at0.y];
         d = Math.sqrt((tp[0] - ccx) * (tp[0] - ccx) + (tp[1] - ccy) * (tp[1] - ccy)) / scale;
-        var op = visOp(d, radius, m);
-        g.setAttribute("opacity", op);
-        if (op !== "0") {
-          // place one body along the rail: each element's angle + side-offset
-          // come from a chord across its own length, so it articulates through
-          // bends and the offset relaxes to the centerline on sharp curves
-          for (var ci = 0; ci < n; ci++) {
-            placeBody(m.carEls[ci], seg, arcPx + dir * (ci - (n - 1) / 2) * STEP, dir, LANE);
+        op = visOp(d, radius, m);
+        if (op) {
+          c.globalAlpha = op;
+          for (ci = 0; ci < n; ci++) {
+            var b = bodyAt(seg, arcPx + dir * (ci - (n - 1) / 2) * STEP, dir, LANE);
+            drawCar(c, A, e, f, b.x, b.y, b.cos, b.sin);
           }
-          placeBody(m.headEl, seg, arcPx + dir * ((n / 2) * STEP + 1), dir, LANE);
+          var hb = bodyAt(seg, arcPx + dir * ((n / 2) * STEP + 1), dir, LANE);
+          hx = hb.x; hy = hb.y;
         }
-        paintLabel(m, tp, op);
       } else { // off-rail: straight consist at the dead-reckoned position
         var lat = st ? st.lat : m.lat, lon = st ? st.lon : m.lon;
         tp = px(lat, lon);
         d = kmBetween(cur.lat, cur.lon, lat, lon);
-        var op2 = visOp(d, radius, m);
-        g.setAttribute("opacity", op2);
-        if (op2 !== "0") {
-          var angle = m.heading == null ? 0 : m.heading - 90;
-          var sinA = Math.sin(angle * Math.PI / 180), cosA = Math.cos(angle * Math.PI / 180);
+        op = visOp(d, radius, m);
+        if (op) {
+          c.globalAlpha = op;
+          var angle = (m.heading == null ? 0 : m.heading - 90) * Math.PI / 180;
+          var sinA = Math.sin(angle), cosA = Math.cos(angle);
           var lx = m.cosH * LANE, ly = m.sinH * LANE;
-          for (var cj = 0; cj < n; cj++) {
-            var off2 = (cj - (n - 1) / 2) * STEP;
-            m.carEls[cj].setAttribute("transform", "translate("
-              + (tp[0] + off2 * cosA + lx) + "," + (tp[1] + off2 * sinA + ly) + ") rotate(" + angle + ")");
+          for (ci = 0; ci < n; ci++) {
+            var off2 = (ci - (n - 1) / 2) * STEP;
+            drawCar(c, A, e, f, tp[0] + off2 * cosA + lx, tp[1] + off2 * sinA + ly, cosA, sinA);
           }
-          m.headEl.setAttribute("transform", "translate("
-            + (tp[0] + ((n / 2) * STEP + 1) * cosA + lx) + "," + (tp[1] + ((n / 2) * STEP + 1) * sinA + ly) + ")");
+          hx = tp[0] + ((n / 2) * STEP + 1) * cosA + lx;
+          hy = tp[1] + ((n / 2) * STEP + 1) * sinA + ly;
         }
-        paintLabel(m, tp, op2);
+      }
+      if (!op) continue;
+      c.setTransform(A, 0, 0, A, e, f);
+      c.fillStyle = m.head;
+      c.beginPath(); c.arc(hx, hy, 2.4, 0, Math.PI * 2); c.fill();
+      if (m.label) {
+        c.fillStyle = "#e8eaf0"; c.font = "13px " + FONT;
+        c.textAlign = m.pos < 2 ? "left" : "right";
+        c.fillText(m.label, tp[0] + (m.pos < 2 ? 14 : -14), tp[1] + (m.pos % 2 ? -13 : 15));
       }
     }
+    c.globalAlpha = 1;
   }
 
   function visOp(d, radius, m) {
-    if (!zooming && !showUnsure && d > radius * 1.02) return "0";
-    if (m.suspect || d > radius * 1.02) return "0.45";
-    return m.bg ? "0.6" : "1";
+    if (!zooming && !showUnsure && d > radius * 1.02) return 0;
+    if (m.suspect || d > radius * 1.02) return 0.45;
+    return m.bg ? 0.6 : 1;
   }
 
-  function paintLabel(m, tp, op) {
-    if (!m.labelEl) return;
-    m.labelEl.setAttribute("x", tp[0] + (m.pos < 2 ? 14 : -14));
-    m.labelEl.setAttribute("y", tp[1] + (m.pos % 2 ? -13 : 15));
-    m.labelEl.setAttribute("opacity", op);
+  // full redraw: rings, cached static layer (or live vectors mid-zoom), trains, marker
+  function drawFrame() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    var p = animProject;
+    if (!p) return;
+    var A = dpr * zoomK, e = dpr * p.cx * (1 - zoomK), f = dpr * p.cy * (1 - zoomK);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (ringsOn) drawRings(ctx, p);
+    if (zoomK === 1) ctx.drawImage(staticCv, 0, 0, viewW, viewH);
+    else { ctx.setTransform(A, 0, 0, A, e, f); drawScene(ctx); }
+    drawTrains(ctx, A, e, f);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawMarker(ctx, p);
   }
 
   // 30fps animation loop; pauses when the tab is hidden
@@ -1133,7 +1199,8 @@
     if (dt > 0.25) dt = 0.25;     // cap after a stall so nothing lurches
     lastFrameT = now;
     advanceTrains(dt);
-    paintTrains();
+    stepZoom();
+    drawFrame();
   }
 
   /* ---------- refresh loop ---------- */
@@ -1175,7 +1242,7 @@
     board.innerHTML = "";
     showStatus("Loading…");
     zoomPending = true;
-    var hadMap = animProject && document.getElementById("zoomG");
+    var hadMap = animProject && staticItems;
     startPolling(); // fetch new station in parallel with the pull-back
     if (hadMap) {
       playZoomOut(function () {
