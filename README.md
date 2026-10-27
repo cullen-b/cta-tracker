@@ -75,7 +75,8 @@ npx wrangler secret put CTA_BUS_KEY   # optional, enables bus mode
 npx wrangler deploy
 ```
 
-You get `https://cta-tracker.<your-subdomain>.workers.dev`. Local dev:
+Live at **https://cta-tracker.cullen77401.workers.dev**. Redeploy after a
+change with `npx wrangler deploy`. Local dev:
 put `CTA_API_KEY=...` (or `CTA_DEMO=1`) in `.dev.vars`, then `npx wrangler dev`.
 One always-on kiosk makes ~14k requests/day, well inside the free tier's
 100k/day, and Workers never cold-start or sleep.

@@ -3,9 +3,9 @@
   "configurations": [
     {
       "name": "cta-tracker",
-      "runtimeExecutable": ".venv/bin/uvicorn",
-      "runtimeArgs": ["main:app", "--port", "8123"],
-      "port": 8123
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "wrangler@4.153.0", "dev", "--port", "8787"],
+      "port": 8787
     }
   ]
 }
