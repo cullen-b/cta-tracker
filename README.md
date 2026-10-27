@@ -31,8 +31,11 @@ localStorage, so the iPad reopens to the same station.
   always-on kiosk uses ~2,900 CTA calls/day against the 50,000/day limit.
 - `stations.json` — all 144 L stations (map_id, name, lines), generated from
   the [City of Chicago L stops dataset](https://data.cityofchicago.org/Transportation/CTA-System-Information-List-of-L-Stops/8pix-ypme).
+- `worker/index.js` — the same proxy as a Cloudflare Worker (JS port of
+  `main.py`, identical JSON output). This is the production host.
 - `static/index.html` — single-file UI, ES5 JavaScript + XMLHttpRequest so it
-  works on old iPad Safari. No external assets, dark theme, big type.
+  works on old iPad Safari. The map is one `<canvas>`: tracks and stations are
+  cached in an offscreen bitmap, and only trains are redrawn each frame.
 
 Countdown minutes come from the CTA prediction itself (`arrT - prdt`), so a
 wrong clock on the server or iPad doesn't skew the numbers.
@@ -50,7 +53,23 @@ Any tiny host works — one process, ~50 MB RAM, no database. It needs to run th
 Python server (GitHub Pages can't — it's static-only, and the CTA API blocks
 direct browser calls via CORS).
 
-### Deploy to Render (free, auto-deploys from GitHub)
+### Deploy to Cloudflare Workers (free tier)
+
+`wrangler.jsonc` serves `static/` as assets and routes `/api/*` to
+`worker/index.js`. No npm install needed:
+
+```
+npx wrangler login
+npx wrangler secret put CTA_API_KEY
+npx wrangler deploy
+```
+
+You get `https://cta-tracker.<your-subdomain>.workers.dev`. Local dev:
+put `CTA_API_KEY=...` (or `CTA_DEMO=1`) in `.dev.vars`, then `npx wrangler dev`.
+One always-on kiosk makes ~14k requests/day, well inside the free tier's
+100k/day, and Workers never cold-start or sleep.
+
+### Deploy to Render (legacy Python host)
 
 `render.yaml` in the repo is a Render Blueprint, so setup is mostly clicks:
 

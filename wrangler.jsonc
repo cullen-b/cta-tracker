@@ -1,0 +1,9 @@
+// Cloudflare Workers config — static/ served as assets, /api/* handled by worker/index.js.
+// Deploy: npx wrangler deploy   (set the key once with: npx wrangler secret put CTA_API_KEY)
+{
+  "name": "cta-tracker",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./static" },
+  "observability": { "enabled": true }
+}
