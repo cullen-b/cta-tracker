@@ -10,39 +10,38 @@ remembered.
 
 ## Setup
 
+Live at **https://cta-tracker.cullen77401.workers.dev** (Cloudflare Workers,
+free tier). Open it on the iPad and pick your station; the choice is saved in
+localStorage, so the iPad reopens to the same station.
+
 1. Get a free CTA **Train Tracker** key: https://www.transitchicago.com/developers/traintrackerapply/
    and a free CTA **Bus Tracker** key: https://www.transitchicago.com/developers/bustracker/
    (bus mode is optional — trains work without a bus key).
-2. Put them in the environment (or a `.env` file in the project root):
+2. Store them as Worker secrets (never in git), then deploy. No npm install needed:
 
    ```
-   CTA_API_KEY=your_train_key_here
-   CTA_BUS_KEY=your_bus_key_here
+   npx wrangler login
+   npx wrangler secret put CTA_API_KEY
+   npx wrangler secret put CTA_BUS_KEY
+   npx wrangler deploy
    ```
 
-   On Render, add both as environment variables in the dashboard (Settings →
-   Environment) — `render.yaml` marks them `sync: false` so they stay out of git.
+Redeploy after any change with `npx wrangler deploy`.
 
-3. Install and run with [uv](https://docs.astral.sh/uv/):
-
-   ```
-   uv sync
-   uv run uvicorn main:app --host 0.0.0.0 --port 8000
-   ```
-
-Open `http://<host>:8000` and pick your station. The choice is saved in
-localStorage, so the iPad reopens to the same station.
+Local dev: put `CTA_API_KEY=...` / `CTA_BUS_KEY=...` (or `CTA_DEMO=1` for fake
+arrivals) in `.dev.vars`, then `npx wrangler dev` and open http://localhost:8787.
 
 ## How it works
 
-- `main.py` — FastAPI server. Proxies the CTA Train Tracker arrivals API
-  (`lapi.transitchicago.com/api/1.0/ttarrivals.aspx`) so the API key never
-  reaches the browser. Responses are cached 25s per station, so even an
-  always-on kiosk uses ~2,900 CTA calls/day against the 50,000/day limit.
+- `worker/index.js` — Cloudflare Worker. Proxies the CTA Train Tracker and
+  Bus Tracker APIs so the keys never reach the browser (the CTA API also blocks
+  direct browser calls via CORS). Live responses are cached ~10s per isolate,
+  keeping an always-on kiosk well under CTA's 50,000 calls/day.
+- `wrangler.jsonc` — serves `static/` as assets and routes `/api/*` to the Worker.
 - `stations.json` — all 144 L stations (map_id, name, lines), generated from
   the [City of Chicago L stops dataset](https://data.cityofchicago.org/Transportation/CTA-System-Information-List-of-L-Stops/8pix-ypme).
-- `worker/index.js` — the same proxy as a Cloudflare Worker (JS port of
-  `main.py`, identical JSON output). This is the production host.
+- `lines.json` / `bus_stops.json` — L track geometry and every bus stop (for
+  nearest-stop lookup; BusTime has no all-stops query).
 - `static/index.html` — single-file UI, ES5 JavaScript + XMLHttpRequest so it
   works on old iPad Safari. The map is one `<canvas>`: tracks and stations are
   cached in an offscreen bitmap, and only trains are redrawn each frame.
@@ -57,48 +56,8 @@ wrong clock on the server or iPad doesn't skew the numbers.
 - Settings → Display → Auto-Lock → Never, and keep it plugged in.
 - Use Guided Access (Settings → Accessibility) to lock it to the page.
 
-## Hosting
+## Cost
 
-Any tiny host works — one process, ~50 MB RAM, no database. It needs to run the
-Python server (GitHub Pages can't — it's static-only, and the CTA API blocks
-direct browser calls via CORS).
-
-### Deploy to Cloudflare Workers (free tier)
-
-`wrangler.jsonc` serves `static/` as assets and routes `/api/*` to
-`worker/index.js`. No npm install needed:
-
-```
-npx wrangler login
-npx wrangler secret put CTA_API_KEY
-npx wrangler secret put CTA_BUS_KEY   # optional, enables bus mode
-npx wrangler deploy
-```
-
-Live at **https://cta-tracker.cullen77401.workers.dev**. Redeploy after a
-change with `npx wrangler deploy`. Local dev:
-put `CTA_API_KEY=...` (or `CTA_DEMO=1`) in `.dev.vars`, then `npx wrangler dev`.
-One always-on kiosk makes ~14k requests/day, well inside the free tier's
-100k/day, and Workers never cold-start or sleep.
-
-### Deploy to Render (legacy Python host)
-
-`render.yaml` in the repo is a Render Blueprint, so setup is mostly clicks:
-
-1. Push this repo to GitHub (already wired to `origin`):
-   ```
-   git add -A && git commit -m "Add Render deploy config" && git push
-   ```
-2. At [dashboard.render.com](https://dashboard.render.com) → **New → Blueprint**,
-   connect the repo. Render reads `render.yaml` and creates the web service.
-3. When prompted, paste your `CTA_API_KEY` (it's marked `sync: false`, so it
-   lives only in Render, never in git). Click **Apply**.
-4. First build takes ~2 min; you get a public `https://cta-tracker-xxx.onrender.com`
-   URL. Open it on the iPad, Add to Home Screen, done.
-
-Every `git push` afterward auto-redeploys. The free tier idles a service after
-15 min of no traffic (~50 s cold start next visit) — but the kiosk polls every
-10 s, so while it's on the wall it never sleeps.
-
-Other hosts (Fly.io, Railway, a Raspberry Pi on the LAN) work the same way: set
-`CTA_API_KEY` as a secret/env var and run the uvicorn command above.
+One always-on kiosk makes ~14k Worker requests/day (arrivals every 10s,
+positions every 15s), well inside the free tier's 100k/day; static assets don't
+count. Workers never cold-start or sleep.

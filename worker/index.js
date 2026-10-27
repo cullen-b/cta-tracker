@@ -1,5 +1,5 @@
-// CTA train arrival board — Cloudflare Worker port of main.py.
-// Proxies the CTA Train Tracker API so the key stays server-side; static/ is served as Workers assets.
+// CTA train + bus arrival board — Cloudflare Worker backend.
+// Proxies the CTA Train Tracker + Bus Tracker APIs so the keys stay server-side; static/ is served as Workers assets.
 import STATIONS from "../stations.json";
 import LINES from "../lines.json";
 import BUS_STOPS_JSON from "../bus_stops.json"; // bundled as raw text (see wrangler.jsonc rules)
