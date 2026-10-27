@@ -2,6 +2,7 @@
 // Proxies the CTA Train Tracker API so the key stays server-side; static/ is served as Workers assets.
 import STATIONS from "../stations.json";
 import LINES from "../lines.json";
+import BUS_STOPS_JSON from "../bus_stops.json"; // bundled as raw text (see wrangler.jsonc rules)
 
 const CTA_URL = "https://lapi.transitchicago.com/api/1.0/ttarrivals.aspx";
 const CTA_POS_URL = "https://lapi.transitchicago.com/api/1.0/ttpositions.aspx";
@@ -187,6 +188,109 @@ function positions(env) {
 
 const HOUR = { "cache-control": "max-age=3600" };
 
+// =====================================================================
+// Bus mode — CTA Bus Tracker (BusTime) API, a completely separate system
+// =====================================================================
+const CTA_BUS_URL = "https://www.ctabustracker.com/bustime/api/v2";
+const BUS_TTL_STATIC_MS = 3600 * 1000; // routes/directions/stops/patterns rarely change
+const BUS_TTL_LIVE_MS = 12 * 1000;     // predictions/vehicles
+const busCache = new Map();
+const RT = /^[A-Za-z0-9]{1,6}$/;
+
+function param(url, name, re, maxLen = 60) {
+  const v = url.searchParams.get(name);
+  if (v === null || v.length > maxLen || (re && !re.test(v))) throw new HttpError(422, `invalid ${name}`);
+  return v;
+}
+
+// cached GET against BusTime; returns the inner container list (stale on transient failure)
+async function busGet(env, path, params, ttl, container) {
+  if (!env.CTA_BUS_KEY) throw new HttpError(503, "CTA_BUS_KEY not set — apply at ctabustracker.com");
+  const ck = path + "?" + Object.keys(params).sort().map((k) => `${k}=${params[k]}`).join("&");
+  const hit = busCache.get(ck);
+  if (hit && Date.now() - hit.at < ttl) return hit.data;
+  let data;
+  try {
+    const q = new URLSearchParams({ key: env.CTA_BUS_KEY, format: "json", ...params });
+    const resp = await fetch(`${CTA_BUS_URL}/${path}?${q}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const body = (await resp.json())["bustime-response"] || {};
+    if ("error" in body && !(container in body)) {
+      throw new HttpError(502, (body.error && body.error[0] && body.error[0].msg) || "bus API error");
+    }
+    data = body[container] || [];
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    if (hit) return hit.data;
+    throw new HttpError(502, `Bus API unreachable: ${err.message}`);
+  }
+  busCache.set(ck, { at: Date.now(), data });
+  return data;
+}
+
+const busMin = (prdctdn) => { const n = parseInt(prdctdn, 10); return /^-?\d+$/.test(String(prdctdn).trim()) ? Math.max(0, n) : 0; }; // "DUE" -> 0
+const busTime = (prdtm) => { // "20261027 13:05" -> "1:05"
+  const m = /^\d{8} (\d{2}):(\d{2})$/.exec(prdtm || "");
+  return m ? `${+m[1] % 12 || 12}:${m[2]}` : "";
+};
+
+async function busRoute(url, env) {
+  switch (url.pathname) {
+    case "/api/bus/allstops":
+      return new Response(BUS_STOPS_JSON, { headers: { "content-type": "application/json", "cache-control": "max-age=86400" } });
+    case "/api/bus/routes": {
+      const rows = await busGet(env, "getroutes", {}, BUS_TTL_STATIC_MS, "routes");
+      return json({ routes: rows.map((r) => ({ rt: r.rt, name: r.rtnm || "", color: r.rtclr || "#888" })) }, 200, HOUR);
+    }
+    case "/api/bus/directions": {
+      const rows = await busGet(env, "getdirections", { rt: param(url, "rt", RT) }, BUS_TTL_STATIC_MS, "directions");
+      return json({ directions: rows.map((d) => d.dir) }, 200, HOUR);
+    }
+    case "/api/bus/stops": {
+      const params = { rt: param(url, "rt", RT), dir: param(url, "dir", null, 20) };
+      const rows = await busGet(env, "getstops", params, BUS_TTL_STATIC_MS, "stops");
+      return json({ stops: rows.map((s) => ({ stpid: String(s.stpid), name: s.stpnm || "", lat: s.lat ?? null, lon: s.lon ?? null })) }, 200, HOUR);
+    }
+    case "/api/bus/patterns": {
+      const rows = await busGet(env, "getpatterns", { rt: param(url, "rt", RT) }, BUS_TTL_STATIC_MS, "ptr");
+      const patterns = rows.map((p) => ({
+        pid: p.pid, dir: p.rtdir || "", length: p.ln || 0,
+        pts: (p.pt || []).map((pt) => [pt.lat, pt.lon, pt.pdist || 0]),
+      }));
+      return json({ patterns }, 200, HOUR);
+    }
+    case "/api/bus/predictions": {
+      const stpid = param(url, "stpid", /^\d{1,7}(,\d{1,7})*$/, 400);
+      const rows = asList(await busGet(env, "getpredictions", { stpid }, BUS_TTL_LIVE_MS, "prd"));
+      const predictions = rows.map((p) => ({
+        route: p.rt || "", dest: p.des || "", dir: p.rtdir || "",
+        min: busMin(p.prdctdn), time: busTime(p.prdtm),
+        approaching: String(p.prdctdn).toUpperCase() === "DUE",
+        delayed: Boolean(p.dly), vid: p.vid || "",
+      })).sort((a, b) => a.min - b.min);
+      return json({ predictions });
+    }
+    case "/api/bus/vehicles": {
+      const rt = param(url, "rt", /^[A-Za-z0-9,]{1,60}$/);
+      const buses = [];
+      for (const v of asList(await busGet(env, "getvehicles", { rt }, BUS_TTL_LIVE_MS, "vehicle"))) {
+        const lat = parseFloat(v.lat), lon = parseFloat(v.lon);
+        if (Number.isNaN(lat) || Number.isNaN(lon)) continue;
+        buses.push({
+          vid: String(v.vid ?? ""), route: v.rt || "", dest: v.des || "", lat, lon,
+          heading: /^\d+$/.test(String(v.hdg ?? "")) ? parseInt(v.hdg, 10) : null,
+          pid: v.pid ?? null,
+          pdist: v.pdist === undefined || v.pdist === null || v.pdist === "" ? null : parseFloat(v.pdist),
+          delayed: Boolean(v.dly),
+        });
+      }
+      return json({ buses });
+    }
+    default:
+      return json({ detail: "Not Found" }, 404);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -196,7 +300,8 @@ export default {
         case "/api/positions": return await positions(env);
         case "/api/stations": return json({ stations: STATIONS, line_order: LINE_ORDER }, 200, HOUR);
         case "/api/lines": return json(LINES, 200, HOUR);
-        default: return json({ detail: "Not Found" }, 404);
+        default:
+          if (url.pathname.startsWith("/api/bus/")) return await busRoute(url, env); return json({ detail: "Not Found" }, 404);
       }
     } catch (err) {
       if (err instanceof HttpError) return json({ detail: err.message }, err.status);

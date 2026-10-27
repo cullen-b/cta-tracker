@@ -225,6 +225,34 @@
     display: inline-block; width: 10px; height: 10px; border-radius: 50%;
     margin-right: 4px;
   }
+  #mode-btn.bus { color: #f9b515; border-color: #6b5410; }
+
+  /* ---------- bus picker ---------- */
+  #bus-picker { display: none; -webkit-flex-direction: column; flex-direction: column; -webkit-flex: 1; flex: 1; min-height: 0; }
+  #picker.busmode #line-tabs, #picker.busmode #stop-list { display: none; }
+  #picker.busmode #bus-picker { display: -webkit-flex; display: flex; }
+  #bus-search {
+    margin: 0 20px 12px; padding: 12px 16px;
+    background: #161b26; border: 1px solid #2a3242; border-radius: 12px;
+    color: #e8eaf0; font-size: 18px; -webkit-appearance: none;
+  }
+  #bus-list { -webkit-flex: 1; flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 20px 30px; }
+  .brow {
+    display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center;
+    padding: 13px 6px; border-bottom: 1px solid #1a2029; cursor: pointer;
+  }
+  .brow.cur .bnm { color: #4ade80; font-weight: bold; }
+  .bchip {
+    min-width: 46px; height: 34px; border-radius: 8px; color: #fff;
+    display: -webkit-inline-flex; display: inline-flex;
+    -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center;
+    font-weight: bold; font-size: 15px; margin-right: 14px; padding: 0 6px;
+    -webkit-flex-shrink: 0; flex-shrink: 0;
+  }
+  .brow .bnm { font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .brow .barrow { margin-left: auto; color: #4b5568; font-size: 20px; }
+  #bus-crumb { padding: 2px 20px 12px; color: #9aa3b5; font-size: 15px; }
+  #bus-crumb b { color: #e8eaf0; }
   @media (max-width: 700px) {
     .col { width: 47%; max-width: 47%; max-height: 42%; padding: 0 10px 4px; }
     .badge { width: 38px; height: 30px; font-size: 9px; margin-right: 8px; border-radius: 7px; }
@@ -241,6 +269,7 @@
 <body>
 <div id="map"></div>
 <header>
+  <button id="mode-btn" class="hbtn" title="Switch trains / buses">&#128649;</button>
   <button id="station-btn">Loading&hellip;<span class="arrow">&#9662;</span></button>
   <button id="fav-toggle" class="hbtn" title="Toggle favorite">&#9733;</button>
   <button id="locate" class="hbtn" title="Nearest station">&#9678;</button>
@@ -261,9 +290,14 @@
 </div>
 
 <div id="picker">
-  <div id="picker-head"><h3>Pick a line, then a stop</h3><button id="picker-close">&#10005;</button></div>
+  <div id="picker-head"><h3 id="picker-title">Pick a line, then a stop</h3><button id="picker-close">&#10005;</button></div>
   <div id="line-tabs"></div>
   <div id="stop-list"></div>
+  <div id="bus-picker">
+    <div id="bus-crumb"></div>
+    <input id="bus-search" type="text" placeholder="Search route…" autocomplete="off">
+    <div id="bus-list"></div>
+  </div>
 </div>
 
 <script>
@@ -321,6 +355,8 @@
   var trainState = {}; // per-run motion state, keyed by run number; survives rebuilds
   var lastRadius = 0, lastRadiusFor = null; // sticky zoom level between refreshes
   var mapSig = null;   // signature of the static scaffold currently in the DOM
+  var mode = read("cta_mode") === "bus" ? "bus" : "train"; // trains vs buses
+  var busStop = null; try { busStop = JSON.parse(read("cta_bus_stop")); } catch (e) {}
 
   // motion tuning (speeds in km/s along the track; ~0.025 km/s ≈ 90 km/h)
   var V_MAX = 0.028, V_DEFAULT = 0.012, V_STOP = 0.0015;
@@ -432,12 +468,17 @@
     closePicker();
     if (id !== curId) { curId = id; stationChanged(); }
   };
-  stnBtn.onclick = openPicker;
+  stnBtn.onclick = function () { if (mode === "bus") openBusPicker(); else openPicker(); };
   document.getElementById("picker-close").onclick = closePicker;
 
   function updateStationBtn() {
-    var s = stationById[curId];
-    stnBtn.innerHTML = (s ? esc(s.name) : "Pick station") + '<span class="arrow">&#9662;</span>';
+    if (mode === "bus") {
+      stnBtn.innerHTML = (busStop && busStop.name ? esc("#" + busStop.rt + " " + busStop.name) : "Pick bus stop")
+        + '<span class="arrow">&#9662;</span>';
+    } else {
+      var s = stationById[curId];
+      stnBtn.innerHTML = (s ? esc(s.name) : "Pick station") + '<span class="arrow">&#9662;</span>';
+    }
   }
 
   /* ---------- favorites ---------- */
@@ -501,7 +542,7 @@
       if (!silent) showStatus("Location unavailable: " + err.message, true);
     }, { timeout: 8000, maximumAge: 300000 });
   }
-  locBtn.onclick = function () { locate(false); };
+  locBtn.onclick = function () { if (mode === "bus") busLocate(false); else locate(false); };
 
   /* ---------- walk-time setting ---------- */
   var walkPop = document.getElementById("walk-pop");
@@ -642,6 +683,8 @@
   var zoomK = 1;          // scale around the station during fly-in / pull-back
   var ringsOn = true;
 
+  function clearMap() { animProject = null; staticItems = null; mapSig = null; drawFrame(); }
+
   function sizeCanvas(w, h) {
     viewW = w; viewH = h;
     cv.width = staticCv.width = Math.round(w * dpr);
@@ -651,7 +694,7 @@
 
   function renderMap(arrivals, fresh) {
     var cur = stationById[curId];
-    if (!cur) { animProject = null; staticItems = null; drawFrame(); return; }
+    if (!cur) { clearMap(); return; }
     var w = mapEl.clientWidth, h = mapEl.clientHeight;
     if (!w || !h) return;
     var cx = w / 2, cy = h / 2;
@@ -793,7 +836,7 @@
     animProject = { px: px, radius: radius, cur: cur, scale: scale, cx: cx, cy: cy };
 
     if (rebuildStatic) {
-      var items = { grey: [], stripes: [], stations: [] };
+      var items = { grey: [], stripes: [], stations: [], stripeW: 4.5, stripeA: 0.9, nameFont: "bold 15px " };
       if (trackRoutes && trackPx) {
         var route, segs, k;
         for (route in trackPx) { // whole network in grey
@@ -877,6 +920,7 @@
         fill: bg ? "#39424f" : (COLORS[a2.route] || "#888"),
         stroke: bg ? "#5a6474" : "#f2f4f8",
         head: bg ? "#78828f" : "#fff7cc",
+        cw: 9, ch: 8, cr: 2.2, hr: 2.4,
         label: label
       };
       if (onTrack) {
@@ -936,8 +980,8 @@
   }
 
   function playZoomIn(cx, cy, radius) {
-    var cur = stationById[curId];
-    if (!staticItems) { zooming = false; drawFrame(); return; }
+    var cur = animProject ? animProject.cur : null;
+    if (!staticItems || !cur) { zooming = false; drawFrame(); return; }
     var k0 = radius / (systemRadiusFrom(cur) * 1.1 + 1);
     ringsOn = false;
     animateZoom(k0, 1, 1800, function () {
@@ -1046,7 +1090,7 @@
       for (var j = 1; j < g.length; j++) c.lineTo(g[j][0], g[j][1]);
     }
     c.stroke();
-    c.lineCap = "round"; c.lineWidth = 4.5; c.globalAlpha = 0.9;
+    c.lineCap = "round"; c.lineWidth = it.stripeW; c.globalAlpha = it.stripeA;
     for (i = 0; i < it.stripes.length; i++) {
       c.strokeStyle = it.stripes[i].color;
       strokePoly(c, it.stripes[i].pts);
@@ -1088,13 +1132,13 @@
     c.strokeStyle = "#0b0e14"; c.lineWidth = 2; c.stroke();
     c.beginPath(); c.arc(p.cx, p.cy, 3, 0, Math.PI * 2);
     c.fillStyle = "#0b0e14"; c.fill();
-    c.fillStyle = "#e8eaf0"; c.font = "bold 15px " + FONT; c.textAlign = "center";
+    c.fillStyle = "#e8eaf0"; c.font = staticItems.nameFont + FONT; c.textAlign = "center";
     c.fillText(p.cur.name, p.cx, p.cy + 30);
   }
 
-  // car body: 9x8 rounded rect centered on the origin
-  function carPath(c) {
-    var x = -4.5, y = -4, w = 9, h = 8, r = 2.2;
+  // car body: rounded rect centered on the origin
+  function carPath(c, m) {
+    var w = m.cw, h = m.ch, r = m.cr, x = -w / 2, y = -h / 2;
     c.beginPath();
     c.moveTo(x + r, y);
     c.arcTo(x + w, y, x + w, y + h, r);
@@ -1105,9 +1149,9 @@
   }
 
   // A/e/f: the frame's uniform scale + translation, so each car is one setTransform
-  function drawCar(c, A, e, f, x, y, cos, sin) {
+  function drawCar(c, A, e, f, x, y, cos, sin, m) {
     c.setTransform(A * cos, A * sin, -A * sin, A * cos, A * x + e, A * y + f);
-    carPath(c);
+    carPath(c, m);
     c.fill(); c.stroke();
   }
 
@@ -1132,7 +1176,7 @@
           c.globalAlpha = op;
           for (ci = 0; ci < n; ci++) {
             var b = bodyAt(seg, arcPx + dir * (ci - (n - 1) / 2) * STEP, dir, LANE);
-            drawCar(c, A, e, f, b.x, b.y, b.cos, b.sin);
+            drawCar(c, A, e, f, b.x, b.y, b.cos, b.sin, m);
           }
           var hb = bodyAt(seg, arcPx + dir * ((n / 2) * STEP + 1), dir, LANE);
           hx = hb.x; hy = hb.y;
@@ -1149,7 +1193,7 @@
           var lx = m.cosH * LANE, ly = m.sinH * LANE;
           for (ci = 0; ci < n; ci++) {
             var off2 = (ci - (n - 1) / 2) * STEP;
-            drawCar(c, A, e, f, tp[0] + off2 * cosA + lx, tp[1] + off2 * sinA + ly, cosA, sinA);
+            drawCar(c, A, e, f, tp[0] + off2 * cosA + lx, tp[1] + off2 * sinA + ly, cosA, sinA, m);
           }
           hx = tp[0] + ((n / 2) * STEP + 1) * cosA + lx;
           hy = tp[1] + ((n / 2) * STEP + 1) * sinA + ly;
@@ -1158,7 +1202,7 @@
       if (!op) continue;
       c.setTransform(A, 0, 0, A, e, f);
       c.fillStyle = m.head;
-      c.beginPath(); c.arc(hx, hy, 2.4, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(hx, hy, m.hr, 0, Math.PI * 2); c.fill();
       if (m.label) {
         c.fillStyle = "#e8eaf0"; c.font = "13px " + FONT;
         c.textAlign = m.pos < 2 ? "left" : "right";
@@ -1253,12 +1297,15 @@
     }
   }
 
-  window.onresize = function () { if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals, false); };
+  window.onresize = function () {
+    if (zooming) return;
+    if (mode === "bus") { if (busStop) renderBusMap(false); }
+    else if (lastArrivals && lastArrivalsFor === curId) renderMap(lastArrivals, false);
+  };
 
-  get("/api/stations?v=3", function (data) {
-    stationList = data.stations;
-    lineOrder = data.line_order;
-    for (var i = 0; i < stationList.length; i++) stationById[stationList[i].map_id] = stationList[i];
+  function initTrain() {
+    applyModeChrome();
+    if (!stationList.length) return; // stations still loading; the fetch callback retries
     var DEFAULT_STATION = "40380"; // Clark/Lake — first-load default before geolocation
     var saved = read("cta_mapid");
     curId = (saved && stationById[saved]) ? saved
@@ -1269,14 +1316,464 @@
     zoomPending = true;
     startPolling();
     if (!saved) locate(true);
+  }
+
+  get("/api/stations?v=3", function (data) {
+    stationList = data.stations;
+    lineOrder = data.line_order;
+    for (var i = 0; i < stationList.length; i++) stationById[stationList[i].map_id] = stationList[i];
+    if (mode === "train") initTrain();
   }, function (msg) {
-    showStatus("Failed to load stations: " + msg, true);
+    if (mode === "train") showStatus("Failed to load stations: " + msg, true);
   });
 
   get("/api/lines", function (data) {
     trackRoutes = data.routes;
-    if (lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals, false);
+    if (mode === "train" && lastArrivals && !zooming && lastArrivalsFor === curId) renderMap(lastArrivals, false);
   }, function () { /* map still works without tracks */ });
+
+  /* ===================== BUS MODE ===================== */
+  var modeBtn = document.getElementById("mode-btn");
+  var busList = document.getElementById("bus-list");
+  var busSearch = document.getElementById("bus-search");
+  var busCrumb = document.getElementById("bus-crumb");
+  var pickerTitle = document.getElementById("picker-title");
+  var BUS_FALLBACK = "#f9b515";
+
+  var busRoutesCache = null, busColors = {};
+  var busStep = "route", busPickRt = null, busPickRtName = null, busPlaces = null;
+  var busPreds = [], busVehicles = [], busPatternsByRt = {}; // patterns cached per route
+  var busTimer = null, busPosTimer = null;
+
+  function paintModeBtn() {
+    modeBtn.innerHTML = mode === "bus" ? "&#128652;" : "&#128649;";
+    modeBtn.className = "hbtn" + (mode === "bus" ? " bus" : "");
+  }
+  function applyModeChrome() {
+    var b = mode === "bus";
+    document.getElementById("fav-toggle").style.display = b ? "none" : "";
+    document.getElementById("unsure-toggle").style.display = b ? "none" : "";
+    // locate works in both modes (nearest station / nearest bus stop)
+    if (b) favBar.style.display = "none";
+  }
+  function stopAllTimers() {
+    if (timer) clearInterval(timer);
+    if (posTimer) clearInterval(posTimer);
+    if (busTimer) clearInterval(busTimer);
+    if (busPosTimer) clearInterval(busPosTimer);
+  }
+  function setMode(m) {
+    if (m === mode) return;
+    mode = m; store("cta_mode", m);
+    paintModeBtn(); applyModeChrome(); closePicker();
+    stopAllTimers();
+    trainState = {}; animTrains = []; trackPx = null; mapSig = null;
+    lastRadiusFor = null; animProject = null; zooming = false; zoomPending = false;
+    lastArrivals = null; lastArrivalsFor = null;
+    board.innerHTML = ""; clearMap(); hideStatus();
+    updateStationBtn();
+    if (mode === "bus") initBus(); else initTrain();
+  }
+  modeBtn.onclick = function () { setMode(mode === "bus" ? "train" : "bus"); };
+
+  function loadBusRoutes(cb) {
+    if (busRoutesCache) { cb && cb(); return; }
+    get("/api/bus/routes", function (d) {
+      busRoutesCache = d.routes;
+      for (var i = 0; i < d.routes.length; i++) busColors[d.routes[i].rt] = d.routes[i].color;
+      cb && cb();
+    }, function (m) { showStatus("Bus routes failed: " + m, true); });
+  }
+
+  function initBus() {
+    applyModeChrome();
+    if (busStop && !busStop.stpids) busStop = null; // drop legacy single-direction saves
+    loadBusRoutes(function () {
+      updateStationBtn();
+      if (busStop && busStop.stpids) { zoomPending = true; startBusPolling(); }
+      else busLocate(true); // first run: jump to nearest stop, fall back to picker
+    });
+  }
+
+  /* ---------- nearest bus stop by geolocation ---------- */
+  var busAllStops = null;
+  function loadBusAllStops(cb) {
+    if (busAllStops) { cb(busAllStops); return; }
+    get("/api/bus/allstops", function (d) { busAllStops = d.stops; cb(busAllStops); },
+      function () { cb(null); });
+  }
+  function busNearestStop(lat, lon) {
+    var best = null, bd = 1e9;
+    for (var i = 0; i < busAllStops.length; i++) {
+      var s = busAllStops[i];
+      var d = kmBetween(lat, lon, s.lat, s.lon);
+      if (d < bd) { bd = d; best = s; }
+    }
+    return best;
+  }
+  function busRouteName(rt) {
+    var rs = busRoutesCache || [];
+    for (var i = 0; i < rs.length; i++) if (rs[i].rt === rt) return rs[i].name;
+    return "";
+  }
+  function busLocate(silent) {
+    if (!navigator.geolocation) { if (!silent) showStatus("Geolocation not supported.", true); openBusPicker(); return; }
+    locBtn.style.color = "#2f5f9e";
+    loadBusAllStops(function (stops) {
+      if (!stops) { locBtn.style.color = ""; if (!silent) showStatus("Stop list unavailable.", true); openBusPicker(); return; }
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        var s = busNearestStop(pos.coords.latitude, pos.coords.longitude);
+        if (!s) { locBtn.style.color = ""; openBusPicker(); return; }
+        // resolve the both-direction place for that stop's route nearest the user
+        busLoadPlaces(s.rt, function (places) {
+          locBtn.style.color = "";
+          if (!places.length) { openBusPicker(); return; }
+          var best = null, bd = 1e9;
+          for (var i = 0; i < places.length; i++) {
+            var d = kmBetween(pos.coords.latitude, pos.coords.longitude, places[i].lat, places[i].lon);
+            if (d < bd) { bd = d; best = places[i]; }
+          }
+          busPickRt = s.rt; busPickRtName = busRouteName(s.rt);
+          setBusStop(best, s.rt, busPickRtName);
+          busStopChanged();
+        });
+      }, function (err) {
+        locBtn.style.color = "";
+        if (!silent) showStatus("Location unavailable: " + err.message, true);
+        openBusPicker();
+      }, { timeout: 8000, maximumAge: 300000 });
+    });
+  }
+
+  /* ---------- bus picker: route -> stop (both directions merged) ---------- */
+  // merge a route's stops across all directions into one place per intersection,
+  // so a place carries both-direction stop IDs (like a train station's platforms)
+  function clusterPlaces(stops) {
+    var places = [];
+    for (var i = 0; i < stops.length; i++) {
+      var s = stops[i]; if (s.lat == null) continue;
+      var best = null, bd = 0.12; // ~120m: pair opposite-side stops, keep neighbours apart
+      for (var p = 0; p < places.length; p++) {
+        var d = kmBetween(places[p].lat, places[p].lon, s.lat, s.lon);
+        if (d < bd) { bd = d; best = places[p]; }
+      }
+      if (best) best.stops.push({ stpid: s.stpid, dir: s.dir });
+      else places.push({ name: s.name, lat: s.lat, lon: s.lon, stops: [{ stpid: s.stpid, dir: s.dir }] });
+    }
+    return places;
+  }
+  function busLoadPlaces(rt, cb) {
+    get("/api/bus/directions?rt=" + encodeURIComponent(rt), function (dd) {
+      var dirs = dd.directions || [], all = [], pending = dirs.length;
+      if (!pending) { cb([]); return; }
+      for (var i = 0; i < dirs.length; i++) (function (dir) {
+        get("/api/bus/stops?rt=" + encodeURIComponent(rt) + "&dir=" + encodeURIComponent(dir), function (sd) {
+          for (var j = 0; j < sd.stops.length; j++) { sd.stops[j].dir = dir; all.push(sd.stops[j]); }
+          if (--pending === 0) cb(clusterPlaces(all));
+        }, function () { if (--pending === 0) cb(clusterPlaces(all)); });
+      })(dirs[i]);
+    }, function () { cb([]); });
+  }
+
+  function openBusPicker() {
+    picker.className = "open busmode";
+    pickerTitle.textContent = "Pick a bus route";
+    busStep = "route"; busPickRt = null;
+    busSearch.value = ""; busSearch.placeholder = "Search route…";
+    renderBusCrumb(); renderBusList("");
+    loadBusRoutes(function () { if (busStep === "route") renderBusList(busSearch.value); });
+  }
+  function renderBusCrumb() {
+    busCrumb.innerHTML = busPickRt ? "<b>#" + esc(busPickRt) + "</b> " + esc(busPickRtName || "") : "";
+  }
+  busSearch.oninput = function () { renderBusList(busSearch.value); };
+
+  function backRow() {
+    return '<div class="brow" data-back="1"><span class="barrow" style="margin:0 12px 0 0">&#8249;</span><span class="bnm">Back</span></div>';
+  }
+  function renderBusList(q) {
+    q = (q || "").toLowerCase();
+    var html = "";
+    if (busStep === "route") {
+      var rs = busRoutesCache || [];
+      for (var i = 0; i < rs.length; i++) {
+        var r = rs[i];
+        if (q && r.rt.toLowerCase().indexOf(q) < 0 && r.name.toLowerCase().indexOf(q) < 0) continue;
+        html += '<div class="brow" data-rt="' + esc(r.rt) + '" data-nm="' + esc(r.name) + '">'
+          + '<span class="bchip" style="background:' + (r.color || BUS_FALLBACK) + '">' + esc(r.rt) + "</span>"
+          + '<span class="bnm">' + esc(r.name) + '</span><span class="barrow">&#8250;</span></div>';
+      }
+    } else {
+      html += backRow();
+      var ps = busPlaces || [];
+      for (var k = 0; k < ps.length; k++) {
+        if (q && ps[k].name.toLowerCase().indexOf(q) < 0) continue;
+        var isCur = busStop && busStop.id === placeId(ps[k]);
+        var dirsN = ps[k].stops.length;
+        html += '<div class="brow' + (isCur ? " cur" : "") + '" data-place="' + k + '">'
+          + '<span class="bnm">' + esc(ps[k].name) + "</span>"
+          + (dirsN > 1 ? '<span class="barrow" style="font-size:13px">&#8646;</span>' : "") + "</div>";
+      }
+    }
+    busList.innerHTML = html || '<div style="color:#4b5568;padding:24px 6px;">No matches</div>';
+  }
+  function placeId(place) {
+    return place.stops.map(function (s) { return s.stpid; }).sort().join("_");
+  }
+
+  busList.onclick = function (e) {
+    var t = e.target || e.srcElement;
+    while (t && t !== busList && !(t.getAttribute && (t.getAttribute("data-rt")
+      || t.getAttribute("data-place") || t.getAttribute("data-back")))) t = t.parentNode;
+    if (!t || !t.getAttribute) return;
+    if (t.getAttribute("data-back")) {
+      busStep = "route"; busPickRt = null; pickerTitle.textContent = "Pick a bus route"; busSearch.placeholder = "Search route…";
+      renderBusCrumb(); renderBusList(busSearch.value); return;
+    }
+    if (busStep === "route") {
+      busPickRt = t.getAttribute("data-rt"); busPickRtName = t.getAttribute("data-nm");
+      busStep = "stop"; busSearch.value = ""; busSearch.placeholder = "Search stop…";
+      pickerTitle.textContent = "Pick a stop"; renderBusCrumb();
+      busList.innerHTML = '<div style="color:#4b5568;padding:24px 6px;">Loading…</div>';
+      busLoadPlaces(busPickRt, function (places) {
+        busPlaces = places; if (busStep === "stop") renderBusList("");
+      });
+    } else {
+      var place = busPlaces[parseInt(t.getAttribute("data-place"), 10)];
+      if (!place) return;
+      setBusStop(place, busPickRt, busPickRtName);
+      closePicker();
+      busStopChanged();
+    }
+  };
+
+  function setBusStop(place, rt, rtName) {
+    busStop = {
+      id: placeId(place), name: place.name, lat: place.lat, lon: place.lon,
+      rt: rt, rtName: rtName || "", color: busColors[rt] || BUS_FALLBACK,
+      stpids: place.stops.map(function (s) { return s.stpid; })
+    };
+    store("cta_bus_stop", JSON.stringify(busStop));
+    updateStationBtn();
+  }
+
+  /* ---------- bus polling + data ---------- */
+  function busStopChanged() {
+    updateStationBtn();
+    board.innerHTML = ""; showStatus("Loading…");
+    zoomPending = true;
+    var hadMap = animProject && staticItems;
+    startBusPolling();
+    if (hadMap) playZoomOut(function () { zooming = false; if (busStop) renderBusMap(true); });
+  }
+  // routes to show = every route with a prediction at the stop (what's on the
+  // board), plus the picked route, capped at 10 (the vehicles API limit)
+  function busRouteSet() {
+    var seen = {}, out = [];
+    if (busStop && busStop.rt) { seen[busStop.rt] = 1; out.push(busStop.rt); }
+    for (var i = 0; i < busPreds.length && out.length < 10; i++) {
+      var r = busPreds[i].route;
+      if (r && !seen[r]) { seen[r] = 1; out.push(r); }
+    }
+    return out;
+  }
+  function ensureBusPatterns(routes, cb) {
+    var need = [];
+    for (var i = 0; i < routes.length; i++) if (!busPatternsByRt[routes[i]]) need.push(routes[i]);
+    if (!need.length) { cb && cb(); return; }
+    var pending = need.length;
+    for (var j = 0; j < need.length; j++) (function (rt) {
+      get("/api/bus/patterns?rt=" + encodeURIComponent(rt), function (d) {
+        busPatternsByRt[rt] = d.patterns; if (--pending === 0) cb && cb();
+      }, function () { busPatternsByRt[rt] = []; if (--pending === 0) cb && cb(); });
+    })(need[j]);
+  }
+  function startBusPolling() {
+    stopAllTimers();
+    refreshBusPreds();
+    busTimer = setInterval(refreshBusPreds, 15000);
+    busPosTimer = setInterval(refreshBusVehicles, 12000);
+  }
+  function refreshBusPreds() {
+    if (!busStop || !busStop.stpids) return;
+    var forId = busStop.id, ids = busStop.stpids.join(",");
+    get("/api/bus/predictions?stpid=" + encodeURIComponent(ids), function (d) {
+      if (mode !== "bus" || !busStop || busStop.id !== forId) return;
+      busPreds = d.predictions;
+      renderBusBoard(d.predictions);
+      ensureBusPatterns(busRouteSet(), function () { refreshBusVehicles(); }); // draw all board routes
+    }, function (m) { if (mode === "bus") showStatus(m, true); });
+  }
+  function refreshBusVehicles() {
+    if (!busStop) return;
+    var routes = busRouteSet(); if (!routes.length) return;
+    var forId = busStop.id;
+    get("/api/bus/vehicles?rt=" + encodeURIComponent(routes.join(",")), function (d) {
+      if (mode !== "bus" || !busStop || busStop.id !== forId) return;
+      busVehicles = d.buses; lastFetch = Date.now();
+      if (!zooming) renderBusMap(true);
+    }, function () { /* map optional */ });
+  }
+
+  /* ---------- bus board ---------- */
+  function renderBusBoard(preds) {
+    if (!preds.length) { board.innerHTML = ""; showStatus("No buses predicted right now."); return; }
+    hideStatus();
+    var groups = {}, order = [];
+    for (var i = 0; i < preds.length; i++) {
+      var k = preds[i].dir || "?";
+      if (!groups[k]) { groups[k] = []; order.push(k); }
+      groups[k].push(preds[i]);
+    }
+    order.sort();
+    var html = "";
+    for (var g = 0; g < order.length; g++) {
+      var grp = groups[order[g]];
+      html += '<div class="col"><h2>' + esc(order[g]) + "</h2>";
+      for (var j = 0; j < grp.length; j++) html += busRowHtml(grp[j]);
+      html += "</div>";
+    }
+    board.innerHTML = html;
+  }
+  function busRowHtml(p) {
+    var col = busColors[p.route] || BUS_FALLBACK;
+    var etaCls = p.delayed ? " delayed" : (p.approaching || p.min <= 1 ? " due" : "");
+    var minTxt = p.delayed ? "dly" : (p.approaching || p.min <= 1 ? "Due" : p.min + "m");
+    var leave = "";
+    if (walkMin > 0 && !p.delayed) {
+      var lm = p.min - walkMin;
+      if (lm <= 0 && p.min >= walkMin - 1) leave = '<span class="cell c-leave now">go now</span>';
+      else if (lm < 0) leave = '<span class="cell c-leave missed">&#10005;</span>';
+      else leave = '<span class="cell c-leave">&#128694;' + lm + "m</span>";
+    }
+    return '<div class="row"><div class="badge" style="background:' + col + ';color:#fff;font-size:13px">'
+      + esc(p.route) + "</div>"
+      + '<div class="dest">' + esc(p.dest) + "</div>"
+      + '<span class="cell c-min' + etaCls + '">' + minTxt + "</span>"
+      + '<span class="cell c-at">' + (p.time ? esc(p.time) : "") + "</span>" + leave + "</div>";
+  }
+
+  /* ---------- bus map (reuses the shared motion + zoom engine) ---------- */
+  function renderBusMap(fresh) {
+    var cur = busStop;
+    if (!cur || cur.lat == null) { clearMap(); return; }
+    var w = mapEl.clientWidth, h = mapEl.clientHeight;
+    if (!w || !h) return;
+    var cx = w / 2, cy = h / 2;
+
+    var predMin = {};
+    for (var pi = 0; pi < busPreds.length; pi++) predMin[busPreds[pi].vid] = busPreds[pi].min;
+
+    // zoom to the nearest bus on the route, bounded so it stays a local view
+    // (a bus at the far end of a long route shouldn't zoom out to the whole city)
+    var vlist = [], nearest = 1e9;
+    for (var i = 0; i < busVehicles.length; i++) {
+      var v = busVehicles[i];
+      var d = kmBetween(cur.lat, cur.lon, v.lat, v.lon);
+      vlist.push({ v: v, d: d });
+      if (d < nearest) nearest = d;
+    }
+    var radius = busVehicles.length ? Math.min(5, Math.max(1.5, nearest * 1.6)) : 2.0;
+    if (!zoomPending && lastRadiusFor === "bus:" + cur.id && lastRadius
+        && Math.abs(radius - lastRadius) / lastRadius < 0.3) radius = lastRadius;
+    lastRadius = radius; lastRadiusFor = "bus:" + cur.id;
+    var half = Math.min(cx, cy) - 24, scale = half / radius;
+    function px(lat, lon) {
+      var dx = (lon - cur.lon) * 111.32 * Math.cos(cur.lat * Math.PI / 180);
+      var dy = (lat - cur.lat) * 110.574;
+      return [cx + dx * scale, cy - dy * scale];
+    }
+    function withCum(pts) {
+      var cum = [0];
+      for (var i = 1; i < pts.length; i++) {
+        var dx = pts[i][0] - pts[i - 1][0], dy = pts[i][1] - pts[i - 1][1];
+        cum.push(cum[i - 1] + Math.sqrt(dx * dx + dy * dy));
+      }
+      return { pts: pts, cum: cum, total: cum[cum.length - 1] };
+    }
+
+    // every route on the board gets its line + buses; draw only the ones whose
+    // pattern geometry has loaded (buses still show for the rest, off-track)
+    var mapRoutes = busRouteSet(), drawRoutes = [];
+    for (var mr = 0; mr < mapRoutes.length; mr++) {
+      var prt = busPatternsByRt[mapRoutes[mr]];
+      if (prt && prt.length) drawRoutes.push(mapRoutes[mr]);
+    }
+
+    var newDpr = window.devicePixelRatio || 1;
+    var sig = "bus:" + cur.id + "|" + Math.round(scale * 100) + "|" + w + "x" + h + "@" + newDpr + "|" + drawRoutes.join(",");
+    var rebuildStatic = zoomPending || sig !== mapSig || !staticItems;
+
+    if (rebuildStatic) {
+      trackPx = {};
+      for (var dr = 0; dr < drawRoutes.length; dr++) {
+        var chains = [], pats = busPatternsByRt[drawRoutes[dr]];
+        for (var p = 0; p < pats.length; p++) {
+          var pts = [], arr = pats[p].pts;
+          for (var pp = 0; pp < arr.length; pp++) pts.push(px(arr[pp][0], arr[pp][1]));
+          if (pts.length > 1) chains.push(withCum(pts));
+        }
+        trackPx[drawRoutes[dr]] = { draw: chains, walk: chains };
+      }
+    }
+
+    animProject = { px: px, radius: radius, cur: { lat: cur.lat, lon: cur.lon, name: cur.name, lines: drawRoutes },
+      scale: scale, cx: cx, cy: cy };
+
+    if (rebuildStatic) {
+      var items = { grey: [], stripes: [], stations: [], stripeW: 4, stripeA: 0.8, nameFont: "bold 14px " };
+      for (var dc = 0; dc < drawRoutes.length; dc++) {
+        var dcol = busColors[drawRoutes[dc]] || BUS_FALLBACK, cs = trackPx[drawRoutes[dc]].draw;
+        for (var c = 0; c < cs.length; c++) items.stripes.push({ pts: cs[c].pts, color: dcol });
+      }
+      dpr = newDpr;
+      sizeCanvas(w, h);
+      staticItems = items;
+      ringsOn = !zoomPending;
+      staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawScene(staticCtx);
+      mapSig = sig;
+    }
+
+    animTrains = [];
+    var ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"], vi = 0;
+    for (var t = 0; t < vlist.length; t++) {
+      if (vlist[t].d > radius * 1.6) continue;
+      var b = vlist[t].v, idx = vi++;
+      var run = "b" + b.vid;
+      var sinH = Math.sin((b.heading || 0) * Math.PI / 180), cosH = Math.cos((b.heading || 0) * Math.PI / 180);
+      var snap = b.heading == null ? null : snapToTrack(b.route, px(b.lat, b.lon));
+      var onTrack = !!(snap && snap.d2 < 2500);
+      var mn = predMin[b.vid];
+      var label = (b.heading != null ? ARROWS[Math.round(b.heading / 45) % 8] : "") + (mn != null ? (mn <= 0 ? "due" : mn + "m") : "");
+      var meta = { run: run, bg: false, suspect: false, nCars: 1, pos: idx % 4, onTrack: onTrack,
+        seg: null, chainIdx: -1, dir: 1, lat: b.lat, lon: b.lon, sinH: sinH, cosH: cosH, heading: b.heading,
+        fill: busColors[b.route] || BUS_FALLBACK, stroke: "#f2f4f8", head: "#fff7cc",
+        cw: 12, ch: 9, cr: 2.5, hr: 2.2, label: label || null };
+      if (onTrack) {
+        var at = pointAtArc(snap.seg, snap.arc);
+        var dir = (at.tx * sinH + at.ty * (-cosH)) >= 0 ? 1 : -1;
+        var rf = snap.arc / (snap.seg.total || 1);
+        meta.seg = snap.seg; meta.chainIdx = snap.chainIdx; meta.dir = dir;
+        var stt = trainState[run];
+        if (fresh || !stt || stt.offTrack) updateTrainTarget(run, snap.chainIdx, rf, dir, snap.seg, false);
+        else if (stt.chainIdx !== snap.chainIdx) { stt.chainIdx = snap.chainIdx; stt.frac = rf; stt.tgtFrac = rf; stt.dir = dir; }
+        else stt.dir = dir;
+      } else if (fresh || !trainState[run]) {
+        trainState[run] = { offTrack: true, lat: b.lat, lon: b.lon, sinH: sinH, cosH: cosH,
+          vKms: b.heading == null ? 0 : V_DEFAULT, tgtTime: lastFetch || 0 };
+      }
+      animTrains.push(meta);
+    }
+    if (zoomPending) zooming = true;
+    if (!animRAF) animRAF = requestAnimationFrame(animLoop);
+    if (zoomPending) { zoomPending = false; playZoomIn(cx, cy, radius); }
+    else drawFrame();
+  }
+
+  /* boot the active mode */
+  paintModeBtn(); applyModeChrome();
+  if (mode === "bus") initBus();
 
   tickClock();
   setInterval(tickClock, 5000);
