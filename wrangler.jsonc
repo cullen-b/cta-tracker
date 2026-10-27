@@ -9,5 +9,7 @@
   "routes": [{ "pattern": "trains.bakerterminal.com", "custom_domain": true }],
   // bus_stops.json (1 MB) is served verbatim, so bundle it as text instead of parsing it at startup
   "rules": [{ "type": "Text", "globs": ["**/bus_stops.json"], "fallthrough": false }],
+  // hard per-request CPU ceiling (requests use a few ms); guards against runaway CPU billing
+  "limits": { "cpu_ms": 50 },
   "observability": { "enabled": true }
 }
