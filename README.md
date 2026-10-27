@@ -10,8 +10,8 @@ remembered.
 
 ## Setup
 
-Live at **https://cta-tracker.cullen77401.workers.dev** (Cloudflare Workers,
-free tier). Open it on the iPad and pick your station; the choice is saved in
+Live at **https://trains.bakerterminal.com** (also
+https://cta-tracker.cullen77401.workers.dev) on Cloudflare Workers, free tier. Open it on the iPad and pick your station; the choice is saved in
 localStorage, so the iPad reopens to the same station.
 
 1. Get a free CTA **Train Tracker** key: https://www.transitchicago.com/developers/traintrackerapply/

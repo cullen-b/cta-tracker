@@ -5,6 +5,8 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-10-01",
   "assets": { "directory": "./static" },
+  "workers_dev": true,
+  "routes": [{ "pattern": "trains.bakerterminal.com", "custom_domain": true }],
   // bus_stops.json (1 MB) is served verbatim, so bundle it as text instead of parsing it at startup
   "rules": [{ "type": "Text", "globs": ["**/bus_stops.json"], "fallthrough": false }],
   "observability": { "enabled": true }
